@@ -17,7 +17,8 @@ pub(crate) struct Described {
     pub name: String,
     pub maker: Option<String>,
     pub summary: Option<String>,
-    pub recommended: bool,
+    /// The recommendation shown beside the name, such as "Recommended for GPU".
+    pub recommended: Option<&'static str>,
 }
 
 impl Described {
@@ -36,34 +37,41 @@ impl Described {
                 name: id.name(),
                 maker: None,
                 summary: Some(id.repo.clone()),
-                recommended: false,
+                recommended: None,
                 id,
             },
         }
     }
 }
 
-/// The models to list before any search: everything installed, then the suggested models that
-/// are not, then any other download in progress.
-pub(crate) fn listed(library: &Library, also: &[ModelId]) -> Vec<Described> {
-    let mut ids: Vec<ModelId> = library
-        .installed_models()
-        .iter()
-        .map(|model| model.id.clone())
-        .collect();
-    for suggested in models::SUGGESTED {
-        if let Some(id) = ModelId::parse(suggested.id)
-            && !ids.contains(&id)
-        {
-            ids.push(id);
-        }
-    }
-    for id in also {
+/// The models to list before any search. With `offer` on, as in the setup, the recommended
+/// models come first with their recommendations, then everything else installed. With it off
+/// only installed models are listed, without recommendations. `also` adds models such as a
+/// download in progress.
+pub(crate) fn listed(library: &Library, also: &[ModelId], offer: bool) -> Vec<Described> {
+    let mut ids: Vec<ModelId> = match offer {
+        true => models::SUGGESTED
+            .iter()
+            .filter(|suggested| suggested.recommended.is_some())
+            .filter_map(|suggested| ModelId::parse(suggested.id))
+            .collect(),
+        false => Vec::new(),
+    };
+    let installed = library.installed_models().iter().map(|model| &model.id);
+    for id in installed.chain(also) {
         if !ids.contains(id) {
             ids.push(id.clone());
         }
     }
-    ids.into_iter().map(Described::of).collect()
+    ids.into_iter()
+        .map(|id| {
+            let mut described = Described::of(id);
+            if !offer {
+                described.recommended = None;
+            }
+            described
+        })
+        .collect()
 }
 
 /// One model's row: its name and maker, what it is good at, where it stands on disk, and the
@@ -170,7 +178,7 @@ pub(crate) fn model_row(
                                     .child(maker),
                             )
                         })
-                        .when(model.recommended, |this| this.child(tag("Recommended", cx))),
+                        .when_some(model.recommended, |this, text| this.child(tag(text, cx))),
                 )
                 .when_some(model.summary, |this, summary| {
                     this.child(

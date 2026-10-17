@@ -90,14 +90,15 @@ impl ModelId {
     }
 }
 
-/// A model worth offering before anyone searches.
+/// A model the app describes by name. The setup offers the ones with a recommendation.
 pub struct Suggested {
     pub id: &'static str,
     pub name: &'static str,
     pub maker: &'static str,
     pub summary: &'static str,
-    /// The one to take when unsure, marked as such in the lists.
-    pub recommended: bool,
+    /// What the model suits best, shown beside its name in the setup, such as "Recommended for
+    /// CPU". Only models with one are offered before anyone searches.
+    pub recommended: Option<&'static str>,
 }
 
 pub const SUGGESTED: &[Suggested] = &[
@@ -106,28 +107,28 @@ pub const SUGGESTED: &[Suggested] = &[
         name: "Parakeet v3",
         maker: "NVIDIA",
         summary: "25 European languages with automatic language detection.",
-        recommended: true,
+        recommended: Some("Recommended for CPU"),
     },
     Suggested {
         id: "handy-computer/gigaam-v3-e2e-ctc-gguf/gigaam-v3-e2e-ctc-Q8_0.gguf",
         name: "GigaAM v3",
         maker: "Sber",
         summary: "Automatic punctuation for Russian-language dictation.",
-        recommended: false,
+        recommended: None,
     },
     Suggested {
         id: "handy-computer/whisper-large-v3-turbo-gguf/whisper-large-v3-turbo-Q8_0.gguf",
         name: "Whisper large v3 turbo",
         maker: "OpenAI",
         summary: "Around 100 languages. Best suited to a graphics card.",
-        recommended: false,
+        recommended: Some("Recommended for GPU"),
     },
     Suggested {
         id: "handy-computer/canary-1b-v2-gguf/canary-1b-v2-Q8_0.gguf",
         name: "Canary 1B v2",
         maker: "NVIDIA",
         summary: "25 European languages with automatic punctuation.",
-        recommended: false,
+        recommended: None,
     },
 ];
 

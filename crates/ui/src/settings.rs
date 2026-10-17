@@ -326,10 +326,10 @@ impl Settings {
             model_search,
             #[cfg(not(target_os = "linux"))]
             hotkey: cx.new(crate::hotkey::Recorder::new),
-            replace_from: cx.new(|cx| Input::new("Heard as", cx)),
-            replace_to: cx.new(|cx| Input::new("Write as", cx)),
-            term: cx.new(|cx| Input::new("Add a name or term", cx)),
-            profile_name: cx.new(|cx| Input::new("Profile name", cx)),
+            replace_from: cx.new(|cx| Input::new("Heard as", cx).compact()),
+            replace_to: cx.new(|cx| Input::new("Write as", cx).compact()),
+            term: cx.new(|cx| Input::new("Add a name or term", cx).compact()),
+            profile_name: cx.new(|cx| Input::new("Profile name", cx).compact()),
             searched: String::new(),
             exploring: false,
             opened: None,
@@ -542,7 +542,7 @@ impl Settings {
             Slot::Title(_) | Slot::ProfileTitle | Slot::Sep => None,
             Slot::Models => plain(
                 "Models",
-                "The model sessions dictate with. Each one downloads once and runs here.",
+                "The installed models. Clicking one makes it the one sessions dictate with.",
             ),
             Slot::Explore => plain(
                 "Explore more models",
@@ -653,7 +653,8 @@ impl Settings {
         }
     }
 
-    /// The column's slots, with a hairline between rows that are not under a fresh label.
+    /// The column's slots, with a hairline between rows that are not under a fresh label. The
+    /// explore row reads as part of the model list above it, so no hairline touches it.
     fn slots(&self, cx: &App) -> Vec<Slot> {
         let bare = match self.searching() {
             false => self.page_slots(self.page, cx),
@@ -661,9 +662,12 @@ impl Settings {
         };
         let mut slots = Vec::with_capacity(bare.len() * 2);
         let mut parted = false;
+        let mut previous = None;
         for slot in bare {
             let titled = matches!(slot, Slot::Title(_) | Slot::ProfileTitle);
-            if parted && !titled {
+            let explore = slot == Slot::Explore || previous == Some(Slot::Explore);
+            previous = Some(slot);
+            if parted && !titled && !explore {
                 slots.push(Slot::Sep);
             }
             parted = !titled;
@@ -1076,7 +1080,7 @@ impl Settings {
     /// The models to choose from. Clicking an installed model makes it the one sessions use.
     fn models(&self, config: &Config, cx: &mut Context<Self>) -> AnyElement {
         let chosen = ModelId::parse(&config.model);
-        let listed = models::listed(self.library.read(cx), chosen.as_slice());
+        let listed = models::listed(self.library.read(cx), &[], false);
         let rows = listed.into_iter().map(|model| {
             let id = model.id.clone();
             let radio = Radio::new(
@@ -1113,7 +1117,7 @@ impl Settings {
     /// The row that opens the model search, marked with a magnifier.
     fn explore_row(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (title, detail) = self.meta(Slot::Explore, cx).unwrap_or_default();
+        let (title, _) = self.meta(Slot::Explore, cx).unwrap_or_default();
         let icon = |path: &str, size: f32| {
             svg()
                 .path(icons::path(path))
@@ -1128,7 +1132,7 @@ impl Settings {
                 .items_center()
                 .gap_3()
                 .child(icon("icons/search.svg", 16.))
-                .child(labels(title, detail, cx))
+                .child(labels(title, None, cx))
                 .child(icon("icons/chevron-right.svg", 16.)),
             cx,
         )

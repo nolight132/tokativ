@@ -278,7 +278,7 @@ impl Setup {
 
     fn models(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let chosen = ModelId::parse(&self.store.read(cx).config().model);
-        let listed = models::listed(self.library.read(cx), chosen.as_slice());
+        let listed = models::listed(self.library.read(cx), chosen.as_slice(), true);
 
         div()
             .flex()
