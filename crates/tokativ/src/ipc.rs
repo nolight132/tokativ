@@ -21,6 +21,8 @@ pub enum Command {
     Cancel,
     /// Switch to a model, named `owner/repository/file.gguf`.
     Model(String),
+    /// Switch to a writing profile by name, which may hold spaces.
+    Profile(String),
     Settings,
     Quit,
     Ping,
@@ -28,6 +30,11 @@ pub enum Command {
 
 impl Command {
     pub fn parse(line: &str) -> Result<Self> {
+        if let Some(("profile", name)) = line.split_once(' ')
+            && !name.trim().is_empty()
+        {
+            return Ok(Self::Profile(name.trim().to_owned()));
+        }
         let mut words = line.split_whitespace();
         let command = match (words.next(), words.next()) {
             (Some("toggle"), None) => Self::Toggle,
@@ -55,6 +62,7 @@ impl Command {
             Self::Confirm => "confirm".into(),
             Self::Cancel => "cancel".into(),
             Self::Model(model) => format!("model {model}"),
+            Self::Profile(name) => format!("profile {name}"),
             Self::Settings => "settings".into(),
             Self::Quit => "quit".into(),
             Self::Ping => "ping".into(),
@@ -203,6 +211,7 @@ mod tests {
             Command::Confirm,
             Command::Cancel,
             Command::Model(tokativ_config::DEFAULT_MODEL.into()),
+            Command::Profile("Late night chat".into()),
             Command::Settings,
             Command::Quit,
             Command::Ping,
@@ -210,6 +219,7 @@ mod tests {
             assert_eq!(Command::parse(&command.line()).unwrap(), command);
         }
         assert!(Command::parse("model").is_err());
+        assert!(Command::parse("profile ").is_err());
         assert!(Command::parse("toggle now").is_err());
     }
 }

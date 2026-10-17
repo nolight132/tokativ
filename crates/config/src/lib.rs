@@ -4,6 +4,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
@@ -146,7 +147,9 @@ pub struct Config {
     /// The setup window was finished. Until then it opens whenever the daemon starts, even
     /// when choices made in it were already saved.
     pub setup_done: bool,
-    pub style: Style,
+    /// The name of the profile dictated text is written in.
+    pub profile: String,
+    pub profiles: Vec<Profile>,
 }
 
 impl Default for Config {
@@ -167,7 +170,8 @@ impl Default for Config {
             hotkey: DEFAULT_HOTKEY.to_owned(),
             live_preview: true,
             setup_done: false,
-            style: Style::default(),
+            profile: Profile::formal().name,
+            profiles: vec![Profile::formal(), Profile::casual()],
         }
     }
 }
@@ -287,14 +291,40 @@ pub struct Replacement {
     pub to: String,
 }
 
-/// How dictated text is rewritten before it is inserted. The models cannot take instructions,
-/// so style is applied to their output by rule.
+/// Which periods stay in dictated text. Question marks, exclamation marks and ellipses always
+/// stay.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Periods {
+    #[default]
+    Keep,
+    /// Every period but the one closing a phrase.
+    DropFinal,
+    /// No periods at all, so sentences run on as in a chat.
+    Drop,
+}
+
+impl Periods {
+    pub const ALL: [Self; 3] = [Self::Keep, Self::DropFinal, Self::Drop];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Keep => "Keep all",
+            Self::DropFinal => "Drop the last",
+            Self::Drop => "Drop all",
+        }
+    }
+}
+
+/// A named way of writing dictated text, picked in the tray or the settings window. The models
+/// cannot take instructions, so a profile rewrites their output by rule.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct Style {
+pub struct Profile {
+    /// What the tray and the settings window call it. Profiles are told apart by name.
+    pub name: String,
     pub capitals: Capitals,
-    /// Keep the period a model puts at the end of a phrase.
-    pub final_period: bool,
+    pub periods: Periods,
     /// Write hyphenated laughter as one word, "ха-ха-ха" as "хахаха".
     pub join_laughter: bool,
     /// Replace explicit spoken emoji names, such as "thumbs up emoji", with the symbol.
@@ -302,7 +332,57 @@ pub struct Style {
     pub replacements: Vec<Replacement>,
 }
 
-impl Default for Style {
+impl Profile {
+    /// Sentences as the model writes them, with their capitals and every period.
+    pub fn formal() -> Self {
+        Self {
+            name: "Formal".to_owned(),
+            capitals: Capitals::AsSpoken,
+            periods: Periods::Keep,
+            join_laughter: false,
+            spoken_emoji: true,
+            replacements: Vec::new(),
+        }
+    }
+
+    /// Text as people type it in a chat: lowercase starts, no periods, laughter as one word.
+    pub fn casual() -> Self {
+        Self {
+            name: "Casual".to_owned(),
+            capitals: Capitals::LowerStarts,
+            periods: Periods::Drop,
+            join_laughter: true,
+            ..Self::formal()
+        }
+    }
+
+    /// Whether two profiles write text the same way, whatever they are called.
+    fn writes_like(&self, other: &Self) -> bool {
+        Self {
+            name: other.name.clone(),
+            ..self.clone()
+        } == *other
+    }
+}
+
+impl Default for Profile {
+    fn default() -> Self {
+        Self::formal()
+    }
+}
+
+/// The single `[style]` table that versions before profiles wrote.
+#[derive(Deserialize)]
+#[serde(default)]
+struct LegacyStyle {
+    capitals: Capitals,
+    final_period: bool,
+    join_laughter: bool,
+    spoken_emoji: bool,
+    replacements: Vec<Replacement>,
+}
+
+impl Default for LegacyStyle {
     fn default() -> Self {
         Self {
             capitals: Capitals::AsSpoken,
@@ -310,6 +390,22 @@ impl Default for Style {
             join_laughter: false,
             spoken_emoji: true,
             replacements: Vec::new(),
+        }
+    }
+}
+
+impl LegacyStyle {
+    fn into_profile(self, name: &str) -> Profile {
+        Profile {
+            name: name.to_owned(),
+            capitals: self.capitals,
+            periods: match self.final_period {
+                true => Periods::Keep,
+                false => Periods::DropFinal,
+            },
+            join_laughter: self.join_laughter,
+            spoken_emoji: self.spoken_emoji,
+            replacements: self.replacements,
         }
     }
 }
@@ -330,12 +426,62 @@ impl Config {
 
     pub fn load_from(path: &Path) -> Result<Self> {
         match fs::read_to_string(path) {
-            Ok(text) => {
-                toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
-            }
+            Ok(text) => Self::parse(&text).with_context(|| format!("parsing {}", path.display())),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
         }
+    }
+
+    /// Reads the text of a config file. A `[style]` table from before profiles becomes the
+    /// selected profile, unless the file lists profiles already.
+    pub fn parse(text: &str) -> Result<Self> {
+        let mut table: toml::Table = toml::from_str(text)?;
+        let legacy = table.remove("style");
+        let listed = table.contains_key("profiles");
+        let mut config: Self = table.try_into()?;
+        if let Some(legacy) = legacy.filter(|_| !listed) {
+            config.adopt(legacy.try_into()?);
+        }
+        Ok(config)
+    }
+
+    /// Selects the profile that writes like an older version's style, adding the style as
+    /// "My style" when no profile does.
+    fn adopt(&mut self, legacy: LegacyStyle) {
+        let style = legacy.into_profile("My style");
+        match self.profiles.iter().find(|known| known.writes_like(&style)) {
+            Some(known) => self.profile = known.name.clone(),
+            None => {
+                self.profile = style.name.clone();
+                self.profiles.insert(0, style);
+            }
+        }
+    }
+
+    /// The profile dictated text is written in: the selected one, or the first when the name
+    /// matches none.
+    pub fn active_profile(&self) -> &Profile {
+        static FALLBACK: LazyLock<Profile> = LazyLock::new(Profile::formal);
+        self.profiles
+            .iter()
+            .find(|profile| profile.name == self.profile)
+            .or(self.profiles.first())
+            .unwrap_or(&FALLBACK)
+    }
+
+    /// The profile dictated text is written in, for editing. When the name matches none it
+    /// selects the first, and when there are none it adds the formal one.
+    pub fn active_profile_mut(&mut self) -> &mut Profile {
+        if self.profiles.is_empty() {
+            self.profiles.push(Profile::formal());
+        }
+        let index = self
+            .profiles
+            .iter()
+            .position(|profile| profile.name == self.profile)
+            .unwrap_or(0);
+        self.profile = self.profiles[index].name.clone();
+        &mut self.profiles[index]
     }
 
     /// Writes the config file through a temporary file and a rename, so the daemon's watcher
@@ -436,19 +582,37 @@ mod tests {
 
     #[test]
     fn partial_file_fills_defaults() {
-        let config: Config =
-            toml::from_str("model = \"gigaam\"\n[vad]\nsilence_ms = 700\n").unwrap();
+        let config = Config::parse("model = \"gigaam\"\n[vad]\nsilence_ms = 700\n").unwrap();
         assert!(config.model.starts_with("handy-computer/gigaam"));
         assert_eq!(config.vad.silence_ms, 700);
         assert_eq!(config.vad.max_segment_s, 20);
-        assert!(config.style.spoken_emoji);
+        assert_eq!(config.active_profile(), &Profile::formal());
     }
 
     #[test]
-    fn spoken_emoji_defaults_on_in_existing_styles_and_can_be_disabled() {
-        let config: Config = toml::from_str("[style]\nfinal_period = false\n").unwrap();
-        assert!(config.style.spoken_emoji);
-        let config: Config = toml::from_str("[style]\nspoken_emoji = false\n").unwrap();
-        assert!(!config.style.spoken_emoji);
+    fn older_styles_become_profiles() {
+        let config = Config::parse("[style]\nspoken_emoji = true\n").unwrap();
+        assert_eq!(config.profile, "Formal");
+        assert_eq!(config.profiles.len(), 2);
+
+        let config = Config::parse("[style]\nfinal_period = false\n").unwrap();
+        assert_eq!(config.profile, "My style");
+        assert_eq!(config.active_profile().periods, Periods::DropFinal);
+        assert!(config.active_profile().spoken_emoji);
+        assert_eq!(config.profiles.len(), 3);
+
+        let listed = "[[profiles]]\nname = \"Formal\"\n[style]\nfinal_period = false\n";
+        let config = Config::parse(listed).unwrap();
+        assert_eq!(config.profiles, vec![Profile::formal()]);
+        assert_eq!(config.active_profile(), &Profile::formal());
+    }
+
+    #[test]
+    fn a_missing_profile_falls_back() {
+        let mut config = Config::parse("profile = \"Gone\"\nprofiles = []\n").unwrap();
+        assert_eq!(config.active_profile(), &Profile::formal());
+        config.active_profile_mut().join_laughter = true;
+        assert_eq!(config.profile, "Formal");
+        assert!(config.active_profile().join_laughter);
     }
 }

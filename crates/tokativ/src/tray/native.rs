@@ -14,6 +14,8 @@ const UPDATES: &str = "updates";
 const QUIT: &str = "quit";
 /// Model entries are this followed by the model's full name.
 const MODEL: &str = "model:";
+/// Profile entries are this followed by the profile's name.
+const PROFILE: &str = "profile:";
 
 /// The running tray icon. Dropping it removes the icon.
 pub struct Tray {
@@ -34,9 +36,10 @@ impl Tray {
                 SETTINGS => TrayEvent::Settings,
                 UPDATES => TrayEvent::Updates,
                 QUIT => TrayEvent::Quit,
-                _ => match id.strip_prefix(MODEL) {
-                    Some(model) => TrayEvent::Model(model.to_owned()),
-                    None => return,
+                _ => match (id.strip_prefix(MODEL), id.strip_prefix(PROFILE)) {
+                    (Some(model), _) => TrayEvent::Model(model.to_owned()),
+                    (_, Some(profile)) => TrayEvent::Profile(profile.to_owned()),
+                    _ => return,
                 },
             };
             events.unbounded_send(event).ok();
@@ -83,7 +86,8 @@ impl Drop for Tray {
     }
 }
 
-/// The menu: start or stop, the installed models with the one in use checked, settings, quit.
+/// The menu: start or stop, the installed models and the profiles with the ones in use checked,
+/// settings, quit.
 fn menu(recording: bool, shown: &Shown) -> Result<Menu> {
     let menu = Menu::new();
     let toggle = match recording {
@@ -99,6 +103,18 @@ fn menu(recording: bool, shown: &Shown) -> Result<Menu> {
                 name,
                 true,
                 *model == shown.model,
+                None,
+            ))?;
+        }
+    }
+    if !shown.profiles.is_empty() {
+        menu.append(&PredefinedMenuItem::separator())?;
+        for profile in &shown.profiles {
+            menu.append(&CheckMenuItem::with_id(
+                format!("{PROFILE}{profile}"),
+                profile,
+                true,
+                *profile == shown.profile,
                 None,
             ))?;
         }

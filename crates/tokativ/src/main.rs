@@ -64,6 +64,11 @@ enum Verb {
         /// An installed model as owner/repository/file.gguf
         model: String,
     },
+    /// Switch the profile dictated text is written in
+    Profile {
+        /// A profile by its name, such as Formal or Casual
+        name: String,
+    },
     /// Open the settings window
     Settings,
     /// Stop the daemon
@@ -114,6 +119,7 @@ fn command(verb: Verb) -> Command {
         Verb::Confirm => Command::Confirm,
         Verb::Cancel => Command::Cancel,
         Verb::Model { model } => Command::Model(model),
+        Verb::Profile { name } => Command::Profile(name),
         Verb::Settings => Command::Settings,
         Verb::Quit => Command::Quit,
     }

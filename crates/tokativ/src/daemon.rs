@@ -317,6 +317,7 @@ impl Daemon {
             Event::Command(command) => self.command(command, cx),
             Event::Tray(TrayEvent::Toggle) => self.toggle(cx),
             Event::Tray(TrayEvent::Model(model)) => self.set_model(model, cx),
+            Event::Tray(TrayEvent::Profile(name)) => self.set_profile(name, cx),
             Event::Tray(TrayEvent::Settings) => self.open_settings(cx),
             #[cfg(not(target_os = "linux"))]
             Event::Tray(TrayEvent::Updates) => tokativ_ui::updates::open(cx),
@@ -346,6 +347,7 @@ impl Daemon {
             Command::Stop | Command::Confirm => self.confirm(cx),
             Command::Cancel => self.cancel(cx),
             Command::Model(model) => self.set_model(model, cx),
+            Command::Profile(name) => self.set_profile(name, cx),
             Command::Settings => self.open_settings(cx),
             Command::Quit => self.quit(cx),
             Command::Ping => {}
@@ -687,7 +689,7 @@ impl Daemon {
     }
 
     fn transcribed(&mut self, id: u64, result: Result<String>, cx: &mut Context<Self>) {
-        let style = &self.applied.style;
+        let style = self.applied.active_profile();
         let capitalize = style.capitals == Capitals::AsSpoken;
         let Some(session) = self.session.as_mut().filter(|session| session.id == id) else {
             return;
@@ -742,7 +744,7 @@ impl Daemon {
 
     /// Shows a draft of the segment being spoken, unless that segment has finished since.
     fn drafted(&mut self, id: u64, segment: usize, result: Result<String>, cx: &mut Context<Self>) {
-        let style = &self.applied.style;
+        let style = self.applied.active_profile();
         let capitalize = style.capitals == Capitals::AsSpoken;
         let Some(session) = self.session.as_mut().filter(|session| session.id == id) else {
             return;
@@ -877,6 +879,24 @@ impl Daemon {
         });
     }
 
+    /// Writes text in the profile with this name from the next phrase on.
+    fn set_profile(&mut self, name: String, cx: &mut Context<Self>) {
+        let known = self
+            .store
+            .read(cx)
+            .config()
+            .profiles
+            .iter()
+            .any(|profile| profile.name == name);
+        if !known {
+            log::warn!("profile: there is no profile called {name:?}");
+            return;
+        }
+        self.store.update(cx, |store, cx| {
+            store.update(|config| config.profile = name, cx)
+        });
+    }
+
     /// Applies a changed config. Session settings take effect from the next session.
     fn apply(&mut self, config: Config, cx: &mut Context<Self>) {
         let old = std::mem::replace(&mut self.applied, config.clone());
@@ -945,11 +965,18 @@ impl Daemon {
         };
     }
 
-    /// The models as the tray lists them.
+    /// The models and profiles as the tray lists them.
     fn shown(&self, cx: &App) -> Shown {
         let library = self.library.read(cx);
+        let config = self.store.read(cx).config();
         Shown {
-            model: self.store.read(cx).config().model.clone(),
+            model: config.model.clone(),
+            profile: config.active_profile().name.clone(),
+            profiles: config
+                .profiles
+                .iter()
+                .map(|profile| profile.name.clone())
+                .collect(),
             installed: library
                 .installed_models()
                 .iter()

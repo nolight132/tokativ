@@ -21,18 +21,22 @@ pub enum TrayEvent {
     Toggle,
     /// Switch to the installed model with this name, `owner/repository/file.gguf`.
     Model(String),
+    /// Write in the profile with this name.
+    Profile(String),
     Settings,
     #[cfg(not(target_os = "linux"))]
     Updates,
     Quit,
 }
 
-/// The models as the tray menu lists them: the one in use and every installed one, each with
-/// its full name and the name to show.
+/// What the tray menu lists: the model in use and every installed one, each with its full name
+/// and the name to show, then the writing profile in use and every profile by name.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Shown {
     pub model: String,
     pub installed: Vec<(String, String)>,
+    pub profile: String,
+    pub profiles: Vec<String>,
 }
 
 /// The tray icon as straight RGBA rows: a hollow ring at rest, a solid red dot while

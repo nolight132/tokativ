@@ -58,7 +58,7 @@ in
       default = { };
       example = lib.literalExpression ''
         {
-          style.final_period = false;
+          profile = "Casual";
           vad.silence_ms = 600;
           pill.margin = 64;
         }

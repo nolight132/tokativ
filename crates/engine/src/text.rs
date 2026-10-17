@@ -4,7 +4,7 @@
 use std::sync::LazyLock;
 
 use regex::Regex;
-use tokativ_config::{Capitals, Style};
+use tokativ_config::{Capitals, Periods, Profile};
 
 const TERMINALS: [char; 4] = ['.', '!', '?', '…'];
 
@@ -14,9 +14,9 @@ static LAUGHTER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(r"(?i)\b{syllable}(?:-{syllable})+\b")).expect("laughter pattern")
 });
 
-/// Rewrites one phrase in the user's style. It runs before [`Joiner::join`], which then sees
+/// Rewrites one phrase as the profile writes. It runs before [`Joiner::join`], which then sees
 /// the phrase as it will be inserted.
-pub fn restyle(text: &str, style: &Style) -> String {
+pub fn restyle(text: &str, style: &Profile) -> String {
     let mut text = text.trim().to_owned();
     for replacement in &style.replacements {
         if replacement.from.is_empty() {
@@ -37,14 +37,36 @@ pub fn restyle(text: &str, style: &Style) -> String {
             .replace_all(&text, |found: &regex::Captures| found[0].replace('-', ""))
             .into_owned();
     }
-    if !style.final_period && text.ends_with('.') && !text.ends_with("..") {
-        text.pop();
-    }
-    match style.capitals {
+    text = match style.capitals {
         Capitals::AsSpoken => text,
         Capitals::Lowercase => text.to_lowercase(),
         Capitals::LowerStarts => lower_starts(&text),
+    };
+    match style.periods {
+        Periods::Keep => text,
+        Periods::DropFinal if text.ends_with('.') && !text.ends_with("..") => {
+            text.pop();
+            text
+        }
+        Periods::DropFinal => text,
+        Periods::Drop => drop_periods(&text),
     }
+}
+
+/// Removes every period that ends a sentence, leaving ellipses and the dots inside numbers.
+fn drop_periods(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    chars
+        .iter()
+        .enumerate()
+        .filter(|&(index, &c)| {
+            let before = index.checked_sub(1).map(|index| chars[index]);
+            let after = chars.get(index + 1).copied();
+            let ends_sentence = after.is_none_or(char::is_whitespace);
+            c != '.' || !ends_sentence || before.is_none_or(|before| before == '.')
+        })
+        .map(|(_, &c)| c)
+        .collect()
 }
 
 /// Lowercases the first letter of every sentence, sparing words whose capital belongs to them.
@@ -151,21 +173,21 @@ mod tests {
     #[test]
     fn spoken_emoji_is_on_by_default_and_can_be_disabled() {
         assert_eq!(
-            restyle("Nice, thumbs up emoji.", &Style::default()),
+            restyle("Nice, thumbs up emoji.", &Profile::formal()),
             "Nice, 👍."
         );
-        let literal = Style {
+        let literal = Profile {
             spoken_emoji: false,
-            ..Style::default()
+            ..Profile::formal()
         };
         assert_eq!(restyle("thumbs up emoji", &literal), "thumbs up emoji");
-        let custom = Style {
+        let custom = Profile {
             replacements: vec![tokativ_config::Replacement {
                 from: "my approval".into(),
                 to: "thumbs up emoji".into(),
             }],
-            final_period: false,
-            ..Style::default()
+            periods: Periods::DropFinal,
+            ..Profile::formal()
         };
         assert_eq!(restyle("my approval.", &custom), "👍");
     }
@@ -197,28 +219,43 @@ mod tests {
     }
 
     #[test]
-    fn style_rewrites_phrases() {
-        let style = Style {
+    fn profiles_rewrite_phrases() {
+        let style = Profile {
             capitals: Capitals::LowerStarts,
-            final_period: false,
+            periods: Periods::DropFinal,
             join_laughter: true,
-            spoken_emoji: true,
             replacements: vec![tokativ_config::Replacement {
                 from: "токатив".into(),
                 to: "Tokativ".into(),
             }],
+            ..Profile::formal()
         };
         assert_eq!(
             restyle("Ха-ха-ха, Токатив работает. Это NASA.", &style),
             "хахаха, Tokativ работает. это NASA"
         );
-        let lowercase = Style {
+        let lowercase = Profile {
             capitals: Capitals::Lowercase,
-            ..Style::default()
+            ..Profile::formal()
         };
         assert_eq!(restyle("Hello There.", &lowercase), "hello there.");
         let mut joiner = Joiner::new(None, false);
         assert_eq!(joiner.join("hi").as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn casual_drops_every_period_and_capital() {
+        assert_eq!(
+            restyle(
+                "Ха-ха, ну да. Встреча в 3.30, NASA подождёт... Идёшь?",
+                &Profile::casual()
+            ),
+            "хаха, ну да встреча в 3.30, NASA подождёт... идёшь?"
+        );
+        assert_eq!(
+            restyle("Ха-ха, ну да. Встреча в 3.30.", &Profile::formal()),
+            "Ха-ха, ну да. Встреча в 3.30."
+        );
     }
 
     #[test]

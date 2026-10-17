@@ -137,6 +137,31 @@ impl ksni::Tray for Item {
             }
             .into(),
             MenuItem::Separator,
+            RadioGroup {
+                selected: self
+                    .shown
+                    .profiles
+                    .iter()
+                    .position(|profile| *profile == self.shown.profile)
+                    .unwrap_or(usize::MAX),
+                select: Box::new(|item: &mut Self, index| {
+                    if let Some(profile) = item.shown.profiles.get(index).cloned() {
+                        item.shown.profile = profile.clone();
+                        item.send(TrayEvent::Profile(profile));
+                    }
+                }),
+                options: self
+                    .shown
+                    .profiles
+                    .iter()
+                    .map(|profile| RadioItem {
+                        label: profile.clone(),
+                        ..Default::default()
+                    })
+                    .collect(),
+            }
+            .into(),
+            MenuItem::Separator,
             Self::entry("Settings", TrayEvent::Settings),
             Self::entry("Quit", TrayEvent::Quit),
         ]

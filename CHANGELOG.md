@@ -7,6 +7,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Writing profiles that decide capitals, periods, laughter, spoken emoji and replacements.
+  Formal and Casual come built in, more can be added, renamed and removed under Writing style,
+  and the tray or `tokativ profile <name>` switches between them. A writing style from an
+  earlier version becomes a profile of its own.
+
 ## [0.3.1] - 2026-10-17
 
 ### Added

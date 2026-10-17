@@ -9,7 +9,7 @@ use gpui::{
     AnyElement, App, Context, Entity, Global, ScrollHandle, SharedString, Size, Task,
     UniformListScrollHandle, Window, WindowHandle, div, px, svg, uniform_list,
 };
-use tokativ_config::{Backend, Capitals, Config, PillEdge, Processor};
+use tokativ_config::{Backend, Capitals, Config, Periods, PillEdge, Processor};
 use tokativ_engine::ModelId;
 use ui::{
     ActiveTheme as _, Button, Input, Menu, MenuItem, Picker, Popovers, Radio, Scrollbar, Scroller,
@@ -167,6 +167,7 @@ pub struct Settings {
     hotkey: Entity<crate::hotkey::Recorder>,
     replace_from: Entity<Input>,
     replace_to: Entity<Input>,
+    profile_name: Entity<Input>,
     term: Entity<Input>,
     /// The query last sent, so a notify that did not change the text does not search again.
     searched: String,
@@ -217,6 +218,7 @@ impl Settings {
             hotkey: cx.new(crate::hotkey::Recorder::new),
             replace_from: cx.new(|cx| Input::new("Heard as", cx)),
             replace_to: cx.new(|cx| Input::new("Write as", cx)),
+            profile_name: cx.new(|cx| Input::new("Profile name", cx)),
             term: cx.new(|cx| Input::new("Add a name or term", cx)),
             searched: String::new(),
             opened: None,
@@ -667,9 +669,114 @@ impl Settings {
         group(Some("System"), rows, cx)
     }
 
-    /// The rules that rewrite each phrase before it is inserted.
+    /// Every profile with the one in use marked, and the field that names a new profile or
+    /// renames the one in use.
+    fn profiles(&self, config: &Config, cx: &mut Context<Self>) -> impl IntoElement {
+        let active = config.active_profile().name.clone();
+        let removable = config.profiles.len() > 1;
+        let mut rows: Vec<AnyElement> = config
+            .profiles
+            .iter()
+            .enumerate()
+            .map(|(index, profile)| {
+                let name = profile.name.clone();
+                let chosen = name == active;
+                let choose = {
+                    let name = name.clone();
+                    cx.listener(move |this, _, _, cx| {
+                        let name = name.clone();
+                        this.edit(cx, |config| config.profile = name);
+                    })
+                };
+                let remove = Button::new(SharedString::from(format!("remove-profile-{index}")))
+                    .icon("icons/x.svg")
+                    .small()
+                    .ghost()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.edit(cx, |config| {
+                            if index < config.profiles.len() && config.profiles.len() > 1 {
+                                config.profiles.remove(index);
+                            }
+                        });
+                    }));
+                div()
+                    .id(SharedString::from(format!("profile-{index}")))
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px(chrome::GROUP_PADDING)
+                    .py_2()
+                    .cursor_pointer()
+                    .on_click(choose)
+                    .child(Radio::new(
+                        SharedString::from(format!("use-profile-{index}")),
+                        chosen,
+                    ))
+                    .child(div().flex_1().min_w_0().child(name))
+                    .when(removable, |this| {
+                        this.child(div().flex_none().child(remove))
+                    })
+                    .into_any_element()
+            })
+            .collect();
+        let rename = Button::new("rename-profile")
+            .label("Rename")
+            .small()
+            .outline()
+            .on_click(cx.listener(|this, _, _, cx| this.name_profile(false, cx)));
+        let add = Button::new("add-profile")
+            .label("Add")
+            .small()
+            .outline()
+            .on_click(cx.listener(|this, _, _, cx| this.name_profile(true, cx)));
+        rows.push(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px(chrome::GROUP_PADDING)
+                .py_3()
+                .child(div().flex_1().min_w_0().child(self.profile_name.clone()))
+                .child(div().flex_none().child(rename))
+                .child(div().flex_none().child(add))
+                .into_any_element(),
+        );
+        group(Some("Profiles"), rows, cx)
+    }
+
+    /// Adds a copy of the profile in use under the name typed in the field and switches to it,
+    /// or with `copy` off renames the profile in use. A name already taken does nothing.
+    fn name_profile(&mut self, copy: bool, cx: &mut Context<Self>) {
+        let name = self.profile_name.read(cx).text().trim().to_owned();
+        let taken = self
+            .store
+            .read(cx)
+            .config()
+            .profiles
+            .iter()
+            .any(|profile| profile.name == name);
+        if name.is_empty() || taken {
+            return;
+        }
+        self.edit(cx, |config| {
+            let profile = config.active_profile_mut();
+            match copy {
+                true => {
+                    let mut copied = profile.clone();
+                    copied.name = name.clone();
+                    config.profiles.push(copied);
+                }
+                false => profile.name = name.clone(),
+            }
+            config.profile = name;
+        });
+        self.profile_name
+            .update(cx, |input, cx| input.set_text("", cx));
+    }
+
+    /// The rules the profile in use rewrites each phrase by before it is inserted.
     fn style(&self, config: &Config, cx: &mut Context<Self>) -> impl IntoElement {
-        let style = config.style.clone();
+        let style = config.active_profile().clone();
         let capitals = style.capitals;
         let capitals_picker = Picker::new("capitals", &self.popovers, capitals.name())
             .width(Picker::REGULAR)
@@ -680,30 +787,41 @@ impl Settings {
                 )
                 .selected(choice == capitals)
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.edit(cx, |config| config.style.capitals = choice);
+                    this.edit(cx, |config| config.active_profile_mut().capitals = choice);
                 }))
             }));
-        let period = style.final_period;
+        let periods = style.periods;
+        let periods_picker = Picker::new("periods", &self.popovers, periods.name())
+            .width(Picker::REGULAR)
+            .items(Periods::ALL.into_iter().map(|choice| {
+                MenuItem::new(
+                    SharedString::from(format!("periods-{choice:?}")),
+                    choice.name(),
+                )
+                .selected(choice == periods)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.edit(cx, |config| config.active_profile_mut().periods = choice);
+                }))
+            }));
         let laughter = style.join_laughter;
         let spoken_emoji = style.spoken_emoji;
         let mut rows = vec![
             setting("Capitals", capitals_picker.into_any_element(), cx).into_any_element(),
             row(
+                "Periods",
+                "Question and exclamation marks always stay.",
+                periods_picker.into_any_element(),
+                cx,
+            )
+            .into_any_element(),
+            row(
                 "Spoken emoji",
                 "“Thumbs up emoji” → 👍. Names in 140+ languages.",
                 Switch::new("spoken-emoji", spoken_emoji)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.edit(cx, |config| config.style.spoken_emoji = !spoken_emoji);
-                    }))
-                    .into_any_element(),
-                cx,
-            )
-            .into_any_element(),
-            setting(
-                "Period at the end",
-                Switch::new("final-period", period)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.edit(cx, |config| config.style.final_period = !period);
+                        this.edit(cx, |config| {
+                            config.active_profile_mut().spoken_emoji = !spoken_emoji
+                        });
                     }))
                     .into_any_element(),
                 cx,
@@ -713,7 +831,9 @@ impl Settings {
                 "Laughter as one word",
                 Switch::new("join-laughter", laughter)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.edit(cx, |config| config.style.join_laughter = !laughter);
+                        this.edit(cx, |config| {
+                            config.active_profile_mut().join_laughter = !laughter
+                        });
                     }))
                     .into_any_element(),
                 cx,
@@ -734,8 +854,10 @@ impl Settings {
                             .ghost()
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.edit(cx, |config| {
-                                    if index < config.style.replacements.len() {
-                                        config.style.replacements.remove(index);
+                                    let replacements =
+                                        &mut config.active_profile_mut().replacements;
+                                    if index < replacements.len() {
+                                        replacements.remove(index);
                                     }
                                 });
                             }));
@@ -775,7 +897,7 @@ impl Settings {
                 .child(div().flex_none().child(add))
                 .into_any_element(),
         );
-        group(None, rows, cx)
+        group(Some(&style.name), rows, cx).into_any_element()
     }
 
     /// Adds the replacement typed into the two fields and clears them.
@@ -787,7 +909,7 @@ impl Settings {
         }
         self.edit(cx, |config| {
             config
-                .style
+                .active_profile_mut()
                 .replacements
                 .push(tokativ_config::Replacement { from, to })
         });
@@ -1273,7 +1395,10 @@ impl Settings {
                 self.detection(config, cx).into_any_element(),
                 self.insertion(config, cx).into_any_element(),
             ],
-            Page::Style => vec![self.style(config, cx).into_any_element()],
+            Page::Style => vec![
+                self.profiles(config, cx).into_any_element(),
+                self.style(config, cx).into_any_element(),
+            ],
             Page::General => vec![
                 self.appearance(config, cx).into_any_element(),
                 self.pill(config, cx).into_any_element(),
