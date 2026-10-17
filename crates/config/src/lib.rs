@@ -325,7 +325,7 @@ pub struct Profile {
     pub name: String,
     pub capitals: Capitals,
     pub periods: Periods,
-    /// Write hyphenated laughter as one word, "ха-ха-ха" as "хахаха".
+    /// Write hyphenated laughter as one word, "ha-ha-ha" as "hahaha".
     pub join_laughter: bool,
     /// Replace explicit spoken emoji names, such as "thumbs up emoji", with the symbol.
     pub spoken_emoji: bool,

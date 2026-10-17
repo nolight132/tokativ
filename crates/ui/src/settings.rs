@@ -589,7 +589,7 @@ impl Settings {
                 "Spoken emoji",
                 "“Thumbs up emoji” → 👍. Names in 140+ languages.",
             ),
-            Slot::Laughter => plain("Laughter as one word", "“Ха-ха-ха” becomes “хахаха”."),
+            Slot::Laughter => plain("Laughter as one word", "“Ha-ha-ha” becomes “hahaha”."),
             Slot::Replacements => plain(
                 "Replacements",
                 "Words to write differently every time they are heard.",
@@ -1137,7 +1137,11 @@ impl Settings {
             cx,
         )
         .on_click(cx.listener(|this, _, window, cx| this.explore(true, window, cx)));
-        div().mx(-HOVER_REACH).child(entry).into_any_element()
+        div()
+            .mx(-HOVER_REACH)
+            .mb_4()
+            .child(entry)
+            .into_any_element()
     }
 
     fn runtime(&self, config: &Config, cx: &mut Context<Self>) -> AnyElement {
