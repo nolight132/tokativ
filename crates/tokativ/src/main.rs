@@ -5,6 +5,8 @@
 // attach to that terminal's console instead, in `main`.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+#[cfg(target_os = "macos")]
+mod accessibility;
 mod assets;
 mod autostart;
 mod daemon;

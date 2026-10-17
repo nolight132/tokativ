@@ -179,6 +179,11 @@ jobs:
         env:
           VERSION: ${{ steps.meta.outputs.version }}
           TARGET: ${{ matrix.target }}
+          # A stable certificate keeps the code requirement the same from one release to the next,
+          # so macOS keeps the Accessibility permission across updates. Ad-hoc signatures change
+          # with every build and lose it. Forks without the secret still sign ad-hoc.
+          SIGNING_P12: ${{ secrets.MACOS_SIGNING_P12 }}
+          SIGNING_PASSWORD: ${{ secrets.MACOS_SIGNING_PASSWORD }}
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -213,7 +218,24 @@ jobs:
           </dict></plist>
           PLIST
             plutil -lint "$app/Contents/Info.plist"
-            codesign --force --deep --sign - "$app"
+            identity=-
+            if [[ -n "${SIGNING_P12:-}" ]]; then
+              keychain="$RUNNER_TEMP/signing.keychain-db"
+              security create-keychain -p "$SIGNING_PASSWORD" "$keychain"
+              security set-keychain-settings -lut 3600 "$keychain"
+              security unlock-keychain -p "$SIGNING_PASSWORD" "$keychain"
+              echo "$SIGNING_P12" | base64 --decode > "$RUNNER_TEMP/signing.p12"
+              security import "$RUNNER_TEMP/signing.p12" -k "$keychain" -P "$SIGNING_PASSWORD" -T /usr/bin/codesign
+              rm "$RUNNER_TEMP/signing.p12"
+              security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$SIGNING_PASSWORD" "$keychain" > /dev/null
+              security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+              security find-certificate -c "Tokativ Code Signing" -p "$keychain" > "$RUNNER_TEMP/signing.pem"
+              sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$RUNNER_TEMP/signing.pem"
+              identity="Tokativ Code Signing"
+            fi
+            codesign --force --deep --sign "$identity" "$app"
+            codesign --verify --deep --strict "$app"
+            codesign --display --requirements - "$app"
             tar -czf "$executable.app.tar.gz" -C "$RUNNER_TEMP" Tokativ.app
             rm "$executable"
           fi
