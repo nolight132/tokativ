@@ -7,12 +7,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-18
+
 ### Added
 
 - Writing profiles that decide capitals, periods, laughter, spoken emoji and replacements.
   Formal and Casual come built in, more can be added, renamed and removed under Writing style,
   and the tray or `tokativ profile <name>` switches between them. A writing style from an
   earlier version becomes a profile of its own.
+- A theme picker with System, Dark and Light, and custom themes read from JSON files in the
+  themes folder in the format Sonora reads.
+- Switches that hide the pill's cancel and confirm buttons.
 
 ### Changed
 
@@ -20,6 +25,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that blurs the rows scrolling beneath, and an entrance when the category changes. General comes
   first, the model search opens from the Model category, and Runtime is a setting of its own.
 - The first-run setup runs inside the settings window and nothing else opens until it is done.
+- The settings list only the installed models. The setup offers Parakeet for the CPU and Whisper
+  large v3 turbo for a graphics card.
+- Rounded corners across the app are squircles, the live caption included, and the caption
+  blurs as it folds away.
+- The window is called Tokativ, and on Windows it draws its minimize, maximize and close
+  buttons.
+
+### Fixed
+
+- Whisper keeps writing in the language spoken when the speech is fast, and no longer answers
+  with its vocabulary prompt, such as "Glossary", when it is unsure.
+- Text reaches X11 apps under Xwayland by pasting, since they ignore the input method and read
+  typed keys in the wrong layout.
+- Recording carries on after the audio device reports a gap in its buffer.
 
 ## [0.3.1] - 2026-10-17
 
@@ -102,7 +121,8 @@ focused app as you speak.
 - A tray icon and a `tokativ` command line control the daemon.
 - The Home Manager module runs Tokativ as a user service and can fetch models at build time.
 
-[unreleased]: https://github.com/nolight132/tokativ/compare/v0.3.1...HEAD
+[unreleased]: https://github.com/nolight132/tokativ/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/nolight132/tokativ/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/nolight132/tokativ/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/nolight132/tokativ/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/nolight132/tokativ/compare/v0.1.0...v0.2.0
