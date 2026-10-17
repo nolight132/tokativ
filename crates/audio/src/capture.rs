@@ -177,7 +177,7 @@ fn build<T>(
     config: &cpal::StreamConfig,
     channels: usize,
     mut sink: impl FnMut(&[f32]) + Send + 'static,
-    mut failed: impl FnMut(String) + Send + 'static,
+    failed: impl FnMut(String) + Send + 'static,
 ) -> Result<cpal::Stream>
 where
     T: SizedSample,
@@ -198,8 +198,48 @@ where
                 }));
                 sink(&mono);
             },
-            move |error| failed(error.to_string()),
+            stream_errors(failed),
             Some(Duration::from_secs(2)),
         )
         .map_err(|error| anyhow!("cannot open the input stream: {error}"))
+}
+
+fn stream_errors(mut failed: impl FnMut(String)) -> impl FnMut(cpal::Error) {
+    move |error| {
+        // WASAPI can report a discontinuity just after a USB microphone starts. CPAL keeps
+        // delivering audio after an xrun; treating it as fatal would stop the recorder and
+        // leave the setup meter silent even though the device is working.
+        if error.kind() == cpal::ErrorKind::Xrun {
+            log::warn!("capture: {error}; continuing capture");
+            return;
+        }
+        failed(error.to_string());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn buffer_discontinuity_does_not_end_capture() {
+        let mut failures = Vec::new();
+        {
+            let mut callback = stream_errors(|error| failures.push(error));
+            callback(cpal::ErrorKind::Xrun.into());
+            callback(cpal::ErrorKind::Xrun.into());
+        }
+        assert!(
+            failures.is_empty(),
+            "a recoverable glitch ended capture: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn disconnected_device_still_ends_capture() {
+        let mut failures = Vec::new();
+        let error = cpal::Error::from(cpal::ErrorKind::DeviceNotAvailable);
+        stream_errors(|error| failures.push(error))(error.clone());
+        assert_eq!(failures, [error.to_string()]);
+    }
 }
