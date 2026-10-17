@@ -69,7 +69,7 @@ pub fn open(cx: &mut App) {
     {
         return;
     }
-    let options = chrome::options("Tokativ settings", Size::new(px(WIDTH), px(HEIGHT)), cx);
+    let options = chrome::options("Tokativ", Size::new(px(WIDTH), px(HEIGHT)), cx);
     match cx.open_window(options, |window, cx| {
         window.set_rem_size(cx.theme().font_size);
         cx.new(|cx| {
@@ -1889,7 +1889,7 @@ impl Render for Settings {
             })
             .child(header)
             .into_any_element();
-        chrome::frame("Settings", content, window, cx)
+        chrome::frame("Tokativ", content, window, cx)
     }
 }
 

@@ -53,7 +53,16 @@ pub fn frame(title: &str, content: AnyElement, window: &mut Window, cx: &mut App
     let theme = cx.theme();
     let radius = window_radius(window);
     let height = ui::snapped(theme.metrics.title_bar, window);
-    let client = matches!(window.window_decorations(), Decorations::Client { .. });
+    // Windows has no title bar of its own under an app that draws one, so the buttons always
+    // show there, as in Sonora. A Wayland window gets them only when it decorates itself, and
+    // macOS keeps its traffic lights.
+    let controls = match cfg!(target_os = "windows") {
+        true => !window.is_fullscreen(),
+        false => {
+            cfg!(not(target_os = "macos"))
+                && matches!(window.window_decorations(), Decorations::Client { .. })
+        }
+    };
 
     let title_bar = div()
         .id("title-bar")
@@ -65,8 +74,6 @@ pub fn frame(title: &str, content: AnyElement, window: &mut Window, cx: &mut App
         .h(height)
         .pl(TITLE_INSET)
         .bg(theme.background)
-        .border_b_1()
-        .border_color(theme.title_bar_border)
         .window_control_area(gpui::WindowControlArea::Drag)
         .on_mouse_down(MouseButton::Left, |event, window, _| {
             match event.click_count {
@@ -81,8 +88,16 @@ pub fn frame(title: &str, content: AnyElement, window: &mut Window, cx: &mut App
                 .text_color(theme.muted_foreground)
                 .child(title.to_owned()),
         )
-        .when(client, |this| {
-            this.child(div().flex_none().pr_2().child(WindowControls::new(false)))
+        .when(controls, |this| {
+            // Windows buttons fill the bar's height and sit flush in the corner.
+            this.child(match cfg!(target_os = "windows") {
+                true => div()
+                    .flex()
+                    .flex_none()
+                    .h_full()
+                    .child(WindowControls::new(false)),
+                false => div().flex_none().pr_2().child(WindowControls::new(false)),
+            })
         });
 
     let frame = div()
