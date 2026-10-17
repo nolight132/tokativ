@@ -1,4 +1,4 @@
-//! The model list and the Hugging Face search, shared by the settings and setup windows.
+//! The model list and the Hugging Face search, shared by the settings and the first-run setup.
 
 use gpui::prelude::*;
 use gpui::{AnyElement, App, ClickEvent, Entity, Pixels, SharedString, Window, div, px};
@@ -68,12 +68,15 @@ pub(crate) fn listed(library: &Library, also: &[ModelId]) -> Vec<Described> {
 
 /// One model's row: its name and maker, what it is good at, where it stands on disk, and the
 /// button that changes that. `leading` goes in front, such as a radio. `choose` runs when an
-/// installed model's row is clicked.
+/// installed model's row is clicked, and such a row shades under the pointer with `radius`
+/// corners. `inset` is the room on either side of the content.
 pub(crate) fn model_row(
     model: Described,
     library: &Entity<Library>,
     leading: Option<AnyElement>,
     choose: Option<Choose>,
+    inset: Pixels,
+    radius: Pixels,
     cx: &App,
 ) -> AnyElement {
     let theme = cx.theme();
@@ -134,10 +137,14 @@ pub(crate) fn model_row(
         .flex()
         .items_start()
         .gap_3()
-        .px(chrome::GROUP_PADDING)
+        .px(inset)
         .py_3()
+        .rounded(radius)
+        .squircle()
         .when_some(choose.filter(|_| installed), |this, choose| {
-            this.cursor_pointer().on_click(choose)
+            this.cursor_pointer()
+                .hover(|style| style.bg(theme.secondary.opacity(0.6)))
+                .on_click(choose)
         })
         .when_some(leading, |this, leading| {
             this.child(div().flex_none().pt(px(2.)).child(leading))
@@ -220,7 +227,10 @@ pub(crate) fn result_row(repository: &Repository, open: Choose, cx: &App) -> Any
         .items_center()
         .gap_3()
         .px(chrome::GROUP_PADDING)
-        .rounded(theme.radius)
+        .rounded(crate::nested_radius(
+            chrome::GROUP_RADIUS,
+            chrome::LISTED_INSET + px(1.),
+        ))
         .squircle()
         .cursor_pointer()
         .hover(|style| style.bg(theme.secondary.opacity(0.6)))

@@ -1,11 +1,12 @@
-//! The first-run window: download models, pick a microphone, try a dictation, and copy the niri
-//! keybind.
+//! The first run: download models, pick a microphone, try a dictation, and copy the niri
+//! keybind. The settings window shows it in place of the settings until it is finished, so
+//! nothing else can be reached before a model is in place.
 
 use gpui::Focusable as _;
 use gpui::prelude::*;
 use gpui::{
-    Animation, AnimationExt as _, App, Context, Entity, Global, ScrollHandle, SharedString, Size,
-    Task, Window, WindowHandle, div, px, relative, svg,
+    Animation, AnimationExt as _, App, Context, Entity, ScrollHandle, SharedString, Task, Window,
+    div, px, relative, svg,
 };
 use std::time::Instant;
 
@@ -21,10 +22,8 @@ use crate::host::{Action, Host, Library, Status, Store};
 use crate::models;
 use crate::settings::device_menu;
 
-/// Names the step the setup window opens on, for working on one step in the sandbox.
+/// Names the step the setup opens on, for working on one step in the sandbox.
 pub const STEP_VARIABLE: &str = "TOKATIV_SETUP_STEP";
-const WIDTH: f32 = 600.;
-const HEIGHT: f32 = 560.;
 /// The height of a step segment and how long the newest one takes to fill.
 const SEGMENT: gpui::Pixels = px(6.);
 const FILL: std::time::Duration = std::time::Duration::from_millis(420);
@@ -35,40 +34,6 @@ const METER_FLOOR: f32 = -60.;
 const BINDING_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 const METER_ATTACK: f32 = 0.03;
 const METER_RELEASE: f32 = 0.3;
-
-struct Open(WindowHandle<Setup>);
-
-impl Global for Open {}
-
-/// Opens the setup window, or raises it when it is already open.
-pub fn open(cx: &mut App) {
-    // An accessory app on macOS stays behind the app in front unless it asks to come forward.
-    #[cfg(target_os = "macos")]
-    cx.activate(true);
-    if let Some(handle) = cx.try_global::<Open>().map(|open| open.0)
-        && handle
-            .update(cx, |_, window, _| window.activate_window())
-            .is_ok()
-    {
-        return;
-    }
-    let options = chrome::options("Set up Tokativ", Size::new(px(WIDTH), px(HEIGHT)), cx);
-    match cx.open_window(options, |window, cx| {
-        window.set_rem_size(cx.theme().font_size);
-        cx.new(|cx| {
-            let mut setup = Setup::new(window, cx);
-            let first = std::env::var(STEP_VARIABLE)
-                .ok()
-                .and_then(|id| Step::ALL.into_iter().find(|step| step.id() == id))
-                .unwrap_or(Step::Models);
-            setup.go(first, window, cx);
-            setup
-        })
-    }) {
-        Ok(handle) => cx.set_global(Open(handle)),
-        Err(error) => log::error!("setup: cannot open the window: {error:#}"),
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Step {
@@ -157,6 +122,17 @@ pub struct Setup {
 }
 
 impl Setup {
+    /// A setup on its first step, or on the step `TOKATIV_SETUP_STEP` names.
+    pub(crate) fn begin(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut setup = Self::new(window, cx);
+        let first = std::env::var(STEP_VARIABLE)
+            .ok()
+            .and_then(|id| Step::ALL.into_iter().find(|step| step.id() == id))
+            .unwrap_or(Step::Models);
+        setup.go(first, window, cx);
+        setup
+    }
+
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let host = Host::global(cx);
         cx.observe(&host.store, |_, _, cx| cx.notify()).detach();
@@ -337,6 +313,8 @@ impl Setup {
                         &self.library,
                         Some(radio),
                         Some(Box::new(choose)),
+                        chrome::GROUP_PADDING,
+                        crate::nested_radius(chrome::GROUP_RADIUS, px(1.)),
                         cx,
                     ))
             }))
@@ -551,12 +529,12 @@ impl Setup {
         }
     }
 
-    fn finish(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Marks the setup done. The settings window sees that and shows the settings in its place.
+    fn finish(&mut self, cx: &mut Context<Self>) {
         self.monitor = None;
         self.store.update(cx, |store, cx| {
             store.update(|config| config.setup_done = true, cx)
         });
-        window.remove_window();
     }
 }
 
@@ -713,12 +691,12 @@ impl Render for Setup {
                     .primary()
                     .disabled(!advance)
                     .on_click(cx.listener(move |this, _, window, cx| match last {
-                        true => this.finish(window, cx),
+                        true => this.finish(cx),
                         false => this.go(Step::ALL[index + 1], window, cx),
                     })),
             );
 
-        let content = div()
+        div()
             .id("setup")
             .size_full()
             .flex()
@@ -737,7 +715,5 @@ impl Render for Setup {
                     .child(Scroller::new("setup-body", &self.scrollbar).child(body)),
             )
             .child(footer)
-            .into_any_element();
-        chrome::frame("Set up Tokativ", content, window, cx)
     }
 }

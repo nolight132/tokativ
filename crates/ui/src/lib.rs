@@ -1,5 +1,5 @@
-//! The windows: the pill and its caption, the settings window and the first-run setup window,
-//! all drawn with Sonora's `ui` crate.
+//! The windows: the pill and its caption and the settings window, which walks through the first
+//! run before it shows any settings, all drawn with Sonora's `ui` crate.
 
 pub mod caption;
 mod chrome;

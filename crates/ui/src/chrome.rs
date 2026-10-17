@@ -1,4 +1,4 @@
-//! The frame shared by the settings and setup windows: a client-drawn title bar with Sonora's
+//! The frame of the settings and update windows: a client-drawn title bar with Sonora's
 //! window controls, rounded corners, and the resize edges.
 
 use gpui::prelude::*;
@@ -39,10 +39,10 @@ pub fn options(title: &str, size: Size<Pixels>, cx: &App) -> WindowOptions {
 
 /// The corner radius of the window itself. Square when tiled, maximized or decorated by the
 /// compositor, since those sit flush against something.
-pub fn window_radius(window: &Window, cx: &App) -> Pixels {
+pub fn window_radius(window: &Window) -> Pixels {
     match window.window_decorations() {
         Decorations::Client { tiling } if !tiling.is_tiled() && !window.is_maximized() => {
-            cx.theme().radius
+            WINDOW_RADIUS
         }
         _ => Pixels::ZERO,
     }
@@ -51,7 +51,7 @@ pub fn window_radius(window: &Window, cx: &App) -> Pixels {
 /// Wraps `content` in the window frame with a title bar reading `title`.
 pub fn frame(title: &str, content: AnyElement, window: &mut Window, cx: &mut App) -> AnyElement {
     let theme = cx.theme();
-    let radius = window_radius(window, cx);
+    let radius = window_radius(window);
     let height = ui::snapped(theme.metrics.title_bar, window);
     let client = matches!(window.window_decorations(), Decorations::Client { .. });
 
@@ -131,106 +131,16 @@ pub fn frame(title: &str, content: AnyElement, window: &mut Window, cx: &mut App
     frame.into_any_element()
 }
 
-/// A section label in Sonora's settings style.
-pub fn section(label: &str, cx: &App) -> impl IntoElement {
-    let theme = cx.theme();
-    div()
-        .h(theme.metrics.row)
-        .flex()
-        .flex_col()
-        .justify_end()
-        .pb_2()
-        .pl_1()
-        .child(ui::eyebrow(label.to_owned(), cx))
-}
-
-/// The corner radius of a settings group. Anything inset in a group takes its corners from this
-/// through [`crate::nested_radius`].
+/// The corner radius of a raised surface such as a card. Anything inset in one takes its corners
+/// from this through [`crate::nested_radius`].
 pub const GROUP_RADIUS: Pixels = px(14.);
-/// How far a group's rows sit from its edges.
+/// How far a card's content sits from its edges.
 pub const GROUP_PADDING: Pixels = px(16.);
-
-/// A group of settings rows on a raised surface, with a hairline between rows. The label goes
-/// above it, and is left out where the page title already names the group.
-pub fn group(label: Option<&str>, rows: Vec<AnyElement>, cx: &App) -> impl IntoElement {
-    let theme = cx.theme();
-    let count = rows.len();
-    div()
-        .when_some(label, |this, label| this.child(section(label, cx)))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .rounded(GROUP_RADIUS)
-                .squircle()
-                .bg(theme.secondary.opacity(0.45))
-                .border_1()
-                .border_color(theme.border.opacity(0.6))
-                .children(rows.into_iter().enumerate().map(move |(index, row)| {
-                    div()
-                        .when(index + 1 < count, |this| {
-                            this.border_b_1().border_color(theme.border.opacity(0.5))
-                        })
-                        .child(row)
-                })),
-        )
-}
-
-/// A settings row: a title with a muted line under it on the left, the control on the right.
-pub fn row(
-    title: &str,
-    detail: impl Into<gpui::SharedString>,
-    action: AnyElement,
-    cx: &App,
-) -> impl IntoElement {
-    labeled(title, Some(detail.into()), action, cx)
-}
-
-/// A settings row whose title says all there is to say, with the control on the right.
-pub fn setting(title: &str, action: AnyElement, cx: &App) -> impl IntoElement {
-    labeled(title, None, action, cx)
-}
-
-fn labeled(
-    title: &str,
-    detail: Option<gpui::SharedString>,
-    action: AnyElement,
-    cx: &App,
-) -> impl IntoElement {
-    let theme = cx.theme();
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap_4()
-        .py_3()
-        .px(GROUP_PADDING)
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_w_0()
-                .gap_1()
-                .child(
-                    div()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .child(title.to_owned()),
-                )
-                .when_some(detail, |this, detail| {
-                    this.child(
-                        div()
-                            .min_w_0()
-                            .text_color(theme.muted_foreground)
-                            .text_size(theme.text(Text::Small))
-                            .child(detail),
-                    )
-                }),
-        )
-        .child(div().flex_none().child(action))
-}
+/// The corner radius of a free-floating window, one step rounder than the cards inside it so
+/// no inner curve is rounder than the frame around it.
+pub const WINDOW_RADIUS: Pixels = px(18.);
+/// How far a list sits inside the raised surface around it.
+pub const LISTED_INSET: Pixels = px(4.);
 
 /// A horizontal track filled to `fraction`, with the fill's corners nested inside the track's.
 pub fn meter(fraction: f32, height: Pixels, cx: &App) -> impl IntoElement {
@@ -278,4 +188,40 @@ pub fn size(bytes: u64) -> String {
         true => format!("{:.1} GB", megabytes / 1000.),
         false => format!("{megabytes:.0} MB"),
     }
+}
+
+/// How many strips the header blur fades in through. Each is one quad, so more of them only
+/// make the crossfade smoother.
+const STRIPS: usize = 64;
+/// The curve of the crossfade, as the exponent on a strip's distance from the solid edge. Below
+/// one, the haze reaches working strength quickly and only the far edge reads as clear.
+const HAZE: f32 = 0.4;
+
+/// A band that blurs what passes under it, at full strength along its top and fading to nothing
+/// across `height`, so a header floating over content stays readable without a hard line where
+/// the blur stops. It fills its parent, which has to be `height` tall and `relative`. Sonora
+/// floats its settings header over the same band.
+pub fn veil(height: Pixels, blur: Pixels, window: &Window) -> impl IntoElement {
+    let edges: Vec<Pixels> = (0..=STRIPS)
+        .map(|slice| ui::snapped(height * (slice as f32 / STRIPS as f32), window))
+        .collect();
+    let strips = edges.windows(2).filter_map(move |span| {
+        let cut = span[1] - span[0];
+        let across = (span[0] + cut / 2.) / height;
+        let held = 1. - across;
+        (cut > Pixels::ZERO).then(|| {
+            div()
+                .flex_none()
+                .w_full()
+                .h(cut)
+                .opacity(held.powf(HAZE))
+                .backdrop_blur(blur)
+        })
+    });
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .flex_col()
+        .children(strips.collect::<Vec<_>>())
 }

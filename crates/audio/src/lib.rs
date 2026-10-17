@@ -68,7 +68,7 @@ enum Control {
 }
 
 /// A running capture. With a detector it cuts speech into segments, without one it only feeds
-/// [`Levels`], which is what the setup window's level meter wants.
+/// [`Levels`], which is what the setup's level meter wants.
 pub struct Recorder {
     control: SyncSender<Control>,
     levels: Levels,

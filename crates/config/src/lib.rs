@@ -1,6 +1,5 @@
 //! The settings file at `$XDG_CONFIG_HOME/tokativ/config.toml` and the paths the app keeps its
-//! data under. The daemon, the settings window and the setup window all read and write it
-//! through this crate.
+//! data under. The daemon and the settings window read and write it through this crate.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -144,8 +143,9 @@ pub struct Config {
     /// Show a draft of the phrase being spoken at the cursor before it is final. Needs the input
     /// method.
     pub live_preview: bool,
-    /// The setup window was finished. Until then it opens whenever the daemon starts, even
-    /// when choices made in it were already saved.
+    /// The first-run setup was finished. Until then the settings window shows it in place of the
+    /// settings and opens whenever the daemon starts, even when choices made in it were already
+    /// saved.
     pub setup_done: bool,
     /// The name of the profile dictated text is written in.
     pub profile: String,

@@ -45,7 +45,7 @@ enum Verb {
         /// Link the models already downloaded, so setup can be tried without downloading them
         #[arg(long)]
         with_models: bool,
-        /// Open the setup window on this step
+        /// Open the first-run setup on this step
         #[arg(long, value_parser = ["models", "microphone", "try", "hotkey"])]
         step: Option<String>,
     },

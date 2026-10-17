@@ -865,7 +865,7 @@ impl Daemon {
     }
 
     /// Switches the model sessions dictate with, keeping the choice in the config. A model that
-    /// is not downloaded opens the setup window instead.
+    /// is not downloaded opens the models in the settings window instead.
     fn set_model(&mut self, model: String, cx: &mut Context<Self>) {
         let installed =
             ModelId::parse(&model).is_some_and(|id| self.library.read(cx).installed(&id));
@@ -1023,7 +1023,7 @@ impl Daemon {
 
     fn open_setup(&mut self, cx: &mut Context<Self>) {
         tokativ_ui::refresh_theme(cx);
-        tokativ_ui::setup::open(cx);
+        tokativ_ui::settings::open_models(cx);
     }
 
     fn quit(&mut self, cx: &mut Context<Self>) {

@@ -30,7 +30,7 @@ other GGUF model.
 
 ## Install
 
-On every platform, the first start opens a setup window that walks through the rest.
+On every platform, the first start opens a window that walks through the rest.
 
 ### Linux
 

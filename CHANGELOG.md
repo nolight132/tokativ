@@ -14,6 +14,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and the tray or `tokativ profile <name>` switches between them. A writing style from an
   earlier version becomes a profile of its own.
 
+### Changed
+
+- Settings follow Sonora's layout: a search over every setting, a bar of categories under it
+  that blurs the rows scrolling beneath, and an entrance when the category changes. General comes
+  first, the model search opens from the Model category, and Runtime is a setting of its own.
+- The first-run setup runs inside the settings window and nothing else opens until it is done.
+
 ## [0.3.1] - 2026-10-17
 
 ### Added

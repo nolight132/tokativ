@@ -1,43 +1,56 @@
-//! The settings window. Every control writes the config through [`Store`], and the daemon
-//! applies the change from there.
+//! The settings window, laid out the way Sonora lays out its settings: a search field and a bar
+//! of categories float over one column of rows, which scrolls beneath them through a blur. Every
+//! control writes the config through [`Store`], and the daemon applies the change from there.
 
 use gpui::Focusable as _;
 use gpui::prelude::*;
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, App, Context, Entity, Global, ScrollHandle, SharedString, Size, Task,
+    AnyElement, App, Context, Entity, Global, Hsla, Pixels, ScrollHandle, SharedString, Size, Task,
     UniformListScrollHandle, Window, WindowHandle, div, px, svg, uniform_list,
 };
 use tokativ_config::{Backend, Capitals, Config, Periods, PillEdge, Processor};
 use tokativ_engine::ModelId;
 use ui::{
-    ActiveTheme as _, Button, Input, Menu, MenuItem, Picker, Popovers, Radio, Scrollbar, Scroller,
-    Scrubber, ScrubberState, Switch, Text,
+    ActiveTheme as _, Button, Entrance, Input, Menu, MenuItem, Picker, Popovers, Radio, Scrollbar,
+    Scroller, Scrubber, ScrubberState, Separator, Switch, TabBar, Text, Vacancy, eyebrow, veiled,
 };
 
-use crate::chrome::{self, group, row, setting};
+use crate::chrome::{self, veil};
 use crate::host::{Files, Host, Library, ModelState, Status, Store};
 use crate::models;
+use crate::setup::Setup;
 use crate::themes;
 use crate::usage::{Sampler, Usage};
 
-const WIDTH: f32 = 920.;
+const WIDTH: f32 = 760.;
 const HEIGHT: f32 = 720.;
-const SIDEBAR: gpui::Pixels = px(220.);
+/// How wide the column of rows, the search field and the category bar grow at most.
+const COLUMN: Pixels = px(640.);
+/// How far the rows are blurred where they pass under the header.
+const HEADER_BLUR: Pixels = px(1.);
+/// How far past the header the rows keep dissolving, so sharp rows never meet the haze at a
+/// hard edge.
+const HEADER_FADE_TAIL: Pixels = px(48.);
+/// How far a clickable row's hover shade reaches past the column on either side.
+const HOVER_REACH: Pixels = px(10.);
+/// How much a query found in a setting's title counts over one found in its detail.
+const TITLE_WEIGHT: u32 = 2;
 /// The ranges the sliders cover.
 const SILENCE_MS: (f32, f32) = (200., 2000.);
 const THRESHOLD: (f32, f32) = (0.2, 0.9);
 const MARGIN: (f32, f32) = (0., 240.);
 const IDLE_MINUTES: [u32; 5] = [0, 5, 15, 30, 60];
-/// How often the resources group reads the daemon's footprint.
+/// How often the resources rows read the daemon's footprint.
 const SAMPLE_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 /// The tallest the microphone menu grows before it scrolls, about seven rows.
-const DEVICE_MENU_HEIGHT: gpui::Pixels = px(300.);
-/// How long typing must pause before the search goes out.
+const DEVICE_MENU_HEIGHT: Pixels = px(300.);
+/// How long typing must pause before a model search goes out.
 const SEARCH_PAUSE: std::time::Duration = std::time::Duration::from_millis(350);
 
-/// Names the page the settings window opens on, for working on one page.
+/// Names the page the settings window opens on, for working on one page. `find` opens the
+/// model search.
 pub const PAGE_VARIABLE: &str = "TOKATIV_SETTINGS_PAGE";
 
 struct Open(WindowHandle<Settings>);
@@ -61,12 +74,16 @@ pub fn open(cx: &mut App) {
         window.set_rem_size(cx.theme().font_size);
         cx.new(|cx| {
             let mut settings = Settings::new(window, cx);
-            let first = std::env::var(PAGE_VARIABLE)
-                .ok()
-                .and_then(|id| Page::from_id(&id));
-            if let Some(page) = first {
-                settings.go(page, window, cx);
+            match std::env::var(PAGE_VARIABLE).ok().as_deref() {
+                Some("find") => settings.explore(true, window, cx),
+                Some(id) => {
+                    if let Some(page) = Page::from_id(id) {
+                        settings.select(page, cx);
+                    }
+                }
+                None => {}
             }
+            settings.entrance = None;
             settings
         })
     }) {
@@ -75,22 +92,33 @@ pub fn open(cx: &mut App) {
     }
 }
 
-/// A page of the settings window, one per entry in the sidebar.
+/// Opens the settings window on the models, for a session that found its model missing. A setup
+/// that is not finished still shows first.
+pub fn open_models(cx: &mut App) {
+    open(cx);
+    if let Some(handle) = cx.try_global::<Open>().map(|open| open.0) {
+        handle
+            .update(cx, |settings, _, cx| settings.select(Page::Model, cx))
+            .ok();
+    }
+}
+
+/// A category of settings, one per entry in the bar under the search field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Page {
     Model,
-    Find,
     Dictation,
     Style,
     General,
 }
 
 impl Page {
+    const ALL: [Self; 4] = [Self::General, Self::Model, Self::Dictation, Self::Style];
+
     /// The name `TOKATIV_SETTINGS_PAGE` takes.
     fn id(self) -> &'static str {
         match self {
             Self::Model => "model",
-            Self::Find => "find",
             Self::Dictation => "dictation",
             Self::Style => "style",
             Self::General => "general",
@@ -105,18 +133,9 @@ impl Page {
         }
     }
 
-    const ALL: [Self; 5] = [
-        Self::Model,
-        Self::Find,
-        Self::Dictation,
-        Self::Style,
-        Self::General,
-    ];
-
     fn title(self) -> &'static str {
         match self {
             Self::Model => "Model",
-            Self::Find => "Find models",
             Self::Dictation => "Dictation",
             Self::Style => "Writing style",
             Self::General => "General",
@@ -126,12 +145,55 @@ impl Page {
     fn icon(self) -> &'static str {
         match self {
             Self::Model => "icons/library-big.svg",
-            Self::Find => "icons/search.svg",
             Self::Dictation => "icons/mic-vocal.svg",
             Self::Style => "icons/pencil.svg",
             Self::General => "icons/settings.svg",
         }
     }
+}
+
+/// One entry of the column, described without building it. A search scores slots by their
+/// title and detail and only builds the ones that match.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Slot {
+    /// A group label over the rows that follow it.
+    Title(&'static str),
+    /// The label over the rows that edit the profile in use, which carries its name.
+    ProfileTitle,
+    /// The hairline between two rows.
+    Sep,
+    Models,
+    Explore,
+    Runtime,
+    Vocabulary,
+    LiveText,
+    Hotkey,
+    Microphone,
+    Pause,
+    Threshold,
+    Method,
+    Profiles,
+    Capitals,
+    Periods,
+    SpokenEmoji,
+    Laughter,
+    Replacements,
+    Theme,
+    CustomThemes,
+    Position,
+    Distance,
+    Caption,
+    CancelButton,
+    ConfirmButton,
+    Login,
+    Tray,
+    Unload,
+    AutoUpdates,
+    Updates,
+    Memory,
+    GraphicsMemory,
+    Processor,
+    Version,
 }
 
 /// A slider whose value is shown while it is dragged and saved once it is let go.
@@ -150,6 +212,8 @@ impl Slider {
 }
 
 pub struct Settings {
+    /// The first run, shown in place of the settings until it is finished.
+    setup: Option<Entity<Setup>>,
     store: Entity<Store>,
     library: Entity<Library>,
     status: Entity<Status>,
@@ -162,18 +226,33 @@ pub struct Settings {
     device_scrollbar: Entity<Scrollbar>,
     usage: Usage,
     _sampling: Task<()>,
-    search_input: Entity<Input>,
+    /// The field over the column that searches the settings themselves.
+    search: Entity<Input>,
+    /// The settings search's text, trimmed. Empty means the column shows one category.
+    query: String,
+    /// The field that searches Hugging Face for models.
+    model_search: Entity<Input>,
     #[cfg(not(target_os = "linux"))]
     hotkey: Entity<crate::hotkey::Recorder>,
     replace_from: Entity<Input>,
     replace_to: Entity<Input>,
-    profile_name: Entity<Input>,
     term: Entity<Input>,
-    /// The query last sent, so a notify that did not change the text does not search again.
+    profile_name: Entity<Input>,
+    /// The model query last sent, so a notify that did not change the text does not search
+    /// again.
     searched: String,
+    /// The model search is showing in place of the model category.
+    exploring: bool,
     /// The search result whose files are listed.
     opened: Option<String>,
     page: Page,
+    /// How tall the header floating over the column measured last, so the rows start beneath it.
+    header_height: Pixels,
+    /// Whether the header has measured itself. Until then the column stays hidden rather than
+    /// flashing unpadded for a frame.
+    header_measured: bool,
+    /// The entrance the column plays after a change of category.
+    entrance: Option<Entrance>,
     results_scroll: UniformListScrollHandle,
     results_scrollbar: Entity<Scrollbar>,
     files_scroll: UniformListScrollHandle,
@@ -185,13 +264,41 @@ impl Settings {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let view = cx.entity_id();
         let host = Host::global(cx);
-        cx.observe(&host.store, |_, _, cx| cx.notify()).detach();
+        cx.observe(&host.store, |this: &mut Self, store, cx| {
+            // Finishing the setup hands the window over to the settings.
+            if this.setup.is_some() && store.read(cx).config().setup_done {
+                this.setup = None;
+                this.page = Page::General;
+                this.reveal(cx);
+            }
+            cx.notify();
+        })
+        .detach();
+        let setup = (!host.store.read(cx).config().setup_done)
+            .then(|| cx.new(|cx| Setup::begin(window, cx)));
         cx.observe(&host.library, |_, _, cx| cx.notify()).detach();
         cx.observe(&host.status, |_, _, cx| cx.notify()).detach();
-        let search_input =
+        let search = cx.new(|cx| {
+            Input::new("Search settings", cx)
+                .icon("icons/search.svg")
+                .clearable()
+                .blurred()
+        });
+        cx.observe(&search, |this: &mut Self, input, cx| {
+            let query = input.read(cx).text().trim().to_owned();
+            // A search lists rows from every category, so wherever the column was scrolled to
+            // answers for nothing once one starts.
+            if this.query.is_empty() && !query.is_empty() {
+                this.scroll_to_top(cx);
+            }
+            this.query = query;
+            cx.notify();
+        })
+        .detach();
+        let model_search =
             cx.new(|cx| Input::new("Search Hugging Face", cx).icon("icons/search.svg"));
-        cx.observe(&search_input, |this: &mut Self, _, cx| {
-            this.query_changed(cx)
+        cx.observe(&model_search, |this: &mut Self, _, cx| {
+            this.model_query_changed(cx)
         })
         .detach();
         let results_scroll = UniformListScrollHandle::new();
@@ -202,6 +309,7 @@ impl Settings {
         })
         .detach();
         Self {
+            setup,
             store: host.store,
             library: host.library,
             status: host.status,
@@ -213,16 +321,22 @@ impl Settings {
             scrollbar: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(view)),
             device_scrollbar: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(view)),
             usage: Usage::default(),
-            search_input,
+            search,
+            query: String::new(),
+            model_search,
             #[cfg(not(target_os = "linux"))]
             hotkey: cx.new(crate::hotkey::Recorder::new),
             replace_from: cx.new(|cx| Input::new("Heard as", cx)),
             replace_to: cx.new(|cx| Input::new("Write as", cx)),
-            profile_name: cx.new(|cx| Input::new("Profile name", cx)),
             term: cx.new(|cx| Input::new("Add a name or term", cx)),
+            profile_name: cx.new(|cx| Input::new("Profile name", cx)),
             searched: String::new(),
+            exploring: false,
             opened: None,
-            page: Page::Model,
+            page: Page::General,
+            header_height: Pixels::ZERO,
+            header_measured: false,
+            entrance: None,
             results_scrollbar: cx.new(|_| {
                 Scrollbar::new(results_scroll.0.borrow().base_handle.clone()).watching(view)
             }),
@@ -253,7 +367,553 @@ impl Settings {
         self.store.update(cx, |store, cx| store.update(edit, cx));
     }
 
-    fn dictation(&self, config: &Config, cx: &mut Context<Self>) -> impl IntoElement {
+    fn searching(&self) -> bool {
+        !self.query.is_empty()
+    }
+
+    /// Shows one category and ends any search or model search, so a click on the bar always
+    /// lands on a plain page.
+    fn select(&mut self, page: Page, cx: &mut Context<Self>) {
+        let moved = self.page != page || self.exploring || self.searching();
+        self.page = page;
+        self.exploring = false;
+        self.popovers.close();
+        if !self.search.read(cx).text().is_empty() {
+            self.search.update(cx, |input, cx| input.set_text("", cx));
+        }
+        if moved {
+            self.scroll_to_top(cx);
+            self.reveal(cx);
+        }
+        cx.notify();
+    }
+
+    /// Swaps the model category for the model search, or back.
+    fn explore(&mut self, exploring: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.page = Page::Model;
+        self.exploring = exploring;
+        self.opened = None;
+        if !self.search.read(cx).text().is_empty() {
+            self.search.update(cx, |input, cx| input.set_text("", cx));
+        }
+        self.scroll_to_top(cx);
+        self.reveal(cx);
+        if exploring {
+            let focus = self.model_search.focus_handle(cx);
+            focus.focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn scroll_to_top(&self, cx: &mut Context<Self>) {
+        self.scrollbar.update(cx, |bar, _| bar.place(Pixels::ZERO));
+    }
+
+    /// Plays the entrance over the column, the way Sonora brings in a page.
+    fn reveal(&mut self, cx: &mut Context<Self>) {
+        self.entrance = (!cx.reduce_motion()).then(Entrance::start);
+    }
+
+    /// How much of the column the entrance still hides, from 1 as it starts to 0.
+    fn hidden(&mut self, window: &mut Window, cx: &App) -> f32 {
+        let Some(entrance) = self.entrance.filter(|_| !cx.reduce_motion()) else {
+            self.entrance = None;
+            return 0.;
+        };
+        if !entrance.running() {
+            self.entrance = None;
+            return 0.;
+        }
+        window.request_animation_frame();
+        entrance.hidden()
+    }
+
+    /// Takes the header's measured height. The rows pad themselves by it and scroll beneath
+    /// the header, and the scrollbar starts below it so the bar never slides under the blur.
+    fn set_header_height(&mut self, height: Pixels, cx: &mut Context<Self>) {
+        if self.header_height == height && self.header_measured {
+            return;
+        }
+        self.header_height = height;
+        self.header_measured = true;
+        self.scrollbar.update(cx, |bar, cx| {
+            bar.set_track_top(height, cx);
+        });
+        cx.notify();
+    }
+
+    /// The slots of one category, group labels included.
+    fn page_slots(&self, page: Page, cx: &App) -> Vec<Slot> {
+        let on_gpu = self
+            .status
+            .read(cx)
+            .device
+            .as_ref()
+            .is_some_and(|device| device.gpu);
+        match page {
+            Page::Model => vec![
+                Slot::Models,
+                Slot::Explore,
+                Slot::Runtime,
+                Slot::Title("Vocabulary"),
+                Slot::Vocabulary,
+            ],
+            Page::Dictation => [
+                match cfg!(target_os = "linux") {
+                    true => Slot::LiveText,
+                    false => Slot::Hotkey,
+                },
+                Slot::Microphone,
+                Slot::Title("Voice detection"),
+                Slot::Pause,
+                Slot::Threshold,
+                Slot::Title("Typing"),
+                Slot::Method,
+            ]
+            .to_vec(),
+            Page::Style => vec![
+                Slot::Profiles,
+                Slot::ProfileTitle,
+                Slot::Capitals,
+                Slot::Periods,
+                Slot::SpokenEmoji,
+                Slot::Laughter,
+                Slot::Replacements,
+            ],
+            Page::General => [
+                Slot::Title("Appearance"),
+                Slot::Theme,
+                Slot::CustomThemes,
+                Slot::Title("Pill"),
+                Slot::Position,
+                Slot::Distance,
+                Slot::Caption,
+                Slot::CancelButton,
+                Slot::ConfirmButton,
+                Slot::Title("System"),
+                Slot::Login,
+                Slot::Tray,
+                Slot::Unload,
+            ]
+            .into_iter()
+            .chain(
+                [Slot::AutoUpdates, Slot::Updates]
+                    .into_iter()
+                    .filter(|_| cfg!(not(target_os = "linux"))),
+            )
+            .chain([Slot::Title("Resources"), Slot::Memory])
+            .chain(on_gpu.then_some(Slot::GraphicsMemory))
+            .chain([Slot::Processor, Slot::Title("About"), Slot::Version])
+            .collect(),
+        }
+    }
+
+    /// Every setting of every category that answers the query, best match first. Ties keep the
+    /// order of the categories.
+    fn found(&self, cx: &App) -> Vec<Slot> {
+        let query = self.query.to_lowercase();
+        let words: Vec<&str> = query.split_whitespace().collect();
+        let mut hits: Vec<(u32, Slot)> = Page::ALL
+            .into_iter()
+            .flat_map(|page| self.page_slots(page, cx))
+            .filter_map(|slot| {
+                let (title, detail) = self.meta(slot, cx)?;
+                let title = title.to_lowercase();
+                let both = format!("{title} {}", detail.unwrap_or_default().to_lowercase());
+                words.iter().all(|word| both.contains(word)).then(|| {
+                    let titled = words.iter().filter(|word| title.contains(*word)).count();
+                    (1 + titled as u32 * TITLE_WEIGHT, slot)
+                })
+            })
+            .collect();
+        hits.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        hits.into_iter().map(|(_, slot)| slot).collect()
+    }
+
+    /// The title and detail a slot shows and a search matches. Labels and hairlines have none,
+    /// so a search never lists them.
+    fn meta(&self, slot: Slot, cx: &App) -> Option<(SharedString, Option<SharedString>)> {
+        let status = self.status.read(cx);
+        let pair = |title: &'static str, detail: Option<String>| {
+            Some((SharedString::from(title), detail.map(SharedString::from)))
+        };
+        let plain = |title: &'static str, detail: &'static str| pair(title, Some(detail.into()));
+        match slot {
+            Slot::Title(_) | Slot::ProfileTitle | Slot::Sep => None,
+            Slot::Models => plain(
+                "Models",
+                "The model sessions dictate with. Each one downloads once and runs here.",
+            ),
+            Slot::Explore => plain(
+                "Explore more models",
+                "Search Hugging Face for Whisper, Canary, Voxtral and other models that run here.",
+            ),
+            Slot::Runtime => pair(
+                "Runtime",
+                Some(match &status.device {
+                    Some(device) => format!("Running on {}.", device.name),
+                    None => "Where the model runs.".to_owned(),
+                }),
+            ),
+            Slot::Vocabulary => plain(
+                "Names and terms",
+                "Spelled the way you write them here, most important first.",
+            ),
+            Slot::LiveText => plain(
+                "Live text",
+                "A draft at the cursor while you speak. Needs the input method.",
+            ),
+            Slot::Hotkey => plain("Hotkey", "Starts a session and finishes it."),
+            Slot::Microphone => plain("Microphone", "The input sessions listen to."),
+            Slot::Pause => plain("Pause length", "How long a silence ends a phrase."),
+            Slot::Threshold => plain(
+                "Speech threshold",
+                "Higher ignores more noise but may clip quiet words.",
+            ),
+            Slot::Method => pair(
+                "Method",
+                Some(match &status.note {
+                    Some(note) => {
+                        format!("Using {}, because {note}.", status.method.to_lowercase())
+                    }
+                    None => "How text reaches the focused app.".to_owned(),
+                }),
+            ),
+            Slot::Profiles => plain(
+                "Profiles",
+                "Switch between them here or from the tray. Add copies the one in use.",
+            ),
+            Slot::Capitals => plain("Capitals", "How sentences start."),
+            Slot::Periods => plain("Periods", "Question and exclamation marks always stay."),
+            Slot::SpokenEmoji => plain(
+                "Spoken emoji",
+                "“Thumbs up emoji” → 👍. Names in 140+ languages.",
+            ),
+            Slot::Laughter => plain("Laughter as one word", "“Ха-ха-ха” becomes “хахаха”."),
+            Slot::Replacements => plain(
+                "Replacements",
+                "Words to write differently every time they are heard.",
+            ),
+            Slot::Theme => plain(
+                "Theme",
+                "System follows the light or dark mode of the desktop.",
+            ),
+            Slot::CustomThemes => plain(
+                "Custom themes",
+                "JSON files in the themes folder, in the format Sonora reads. A saved file shows up right away.",
+            ),
+            Slot::Position => plain("Pill position", "The edge of the screen the pill sits on."),
+            Slot::Distance => plain("Distance from the edge", "The gap under or over the pill."),
+            Slot::Caption => plain(
+                "Live caption",
+                "A floating text window below the top pill or above the bottom pill.",
+            ),
+            Slot::CancelButton => plain(
+                "Cancel button",
+                "The cross on the left. Escape cancels without it.",
+            ),
+            Slot::ConfirmButton => plain(
+                "Confirm button",
+                "The check mark on the right. Enter or the hotkey finishes without it.",
+            ),
+            Slot::Login => plain(
+                "Launch at login",
+                "Not needed with the Home Manager service.",
+            ),
+            Slot::Tray => plain("Tray icon", "Switch models and profiles from the panel."),
+            Slot::Unload => plain(
+                "Unload models",
+                "Frees memory between sessions. The next one starts a moment later.",
+            ),
+            Slot::AutoUpdates => plain(
+                "Automatic update checks",
+                "Looks for a new release now and then.",
+            ),
+            Slot::Updates => plain("Updates", "Look for a new release now."),
+            Slot::Memory => pair(
+                "Memory",
+                Some(
+                    match status.device.as_ref().is_some_and(|device| device.gpu) {
+                        true => "The app itself. The model's weights sit on the graphics card.",
+                        false => "The app and the model's weights, which run on the CPU.",
+                    }
+                    .to_owned(),
+                ),
+            ),
+            Slot::GraphicsMemory => plain("Graphics memory", "The model's weights."),
+            Slot::Processor => plain("Processor", "How busy the app keeps the CPU."),
+            Slot::Version => pair(
+                "Tokativ",
+                Some(format!(
+                    "Version {}. {} models installed.",
+                    env!("CARGO_PKG_VERSION"),
+                    self.library.read(cx).installed_models().len()
+                )),
+            ),
+        }
+    }
+
+    /// The column's slots, with a hairline between rows that are not under a fresh label.
+    fn slots(&self, cx: &App) -> Vec<Slot> {
+        let bare = match self.searching() {
+            false => self.page_slots(self.page, cx),
+            true => self.found(cx),
+        };
+        let mut slots = Vec::with_capacity(bare.len() * 2);
+        let mut parted = false;
+        for slot in bare {
+            let titled = matches!(slot, Slot::Title(_) | Slot::ProfileTitle);
+            if parted && !titled {
+                slots.push(Slot::Sep);
+            }
+            parted = !titled;
+            slots.push(slot);
+        }
+        slots
+    }
+
+    /// A plain row for a slot: its title and detail on the left, `action` on the right.
+    fn row(&self, slot: Slot, action: impl IntoElement, cx: &App) -> AnyElement {
+        let (title, detail) = self.meta(slot, cx).unwrap_or_default();
+        row(title, detail, action.into_any_element(), cx)
+    }
+
+    fn slot_element(&mut self, slot: Slot, config: &Config, cx: &mut Context<Self>) -> AnyElement {
+        match slot {
+            Slot::Title(label) => title(label, cx),
+            Slot::ProfileTitle => title(&config.active_profile().name.clone(), cx),
+            Slot::Sep => Separator::horizontal().w_full().into_any_element(),
+            Slot::Models => self.models(config, cx),
+            Slot::Explore => self.explore_row(cx),
+            Slot::Runtime => self.runtime(config, cx),
+            Slot::Vocabulary => self.vocabulary(config, cx),
+            Slot::LiveText => {
+                let live = config.live_preview;
+                let switch = Switch::new("live-preview", live).on_click(cx.listener(
+                    move |this, _, _, cx| this.edit(cx, |config| config.live_preview = !live),
+                ));
+                self.row(slot, switch, cx)
+            }
+            #[cfg(not(target_os = "linux"))]
+            Slot::Hotkey => self.row(slot, self.hotkey.clone(), cx),
+            #[cfg(target_os = "linux")]
+            Slot::Hotkey => div().into_any_element(),
+            Slot::Microphone => self.microphone(config, cx),
+            Slot::Pause => {
+                let silence = self
+                    .silence
+                    .dragging
+                    .unwrap_or_else(|| fraction(config.vad.silence_ms as f32, SILENCE_MS));
+                let ms = value(silence, SILENCE_MS).round() as u32;
+                let slider = self.slider(
+                    &self.silence,
+                    silence,
+                    format!("{ms} ms"),
+                    |this| &mut this.silence,
+                    |config, fraction| {
+                        config.vad.silence_ms = value(fraction, SILENCE_MS).round() as u32
+                    },
+                    cx,
+                );
+                self.row(slot, slider, cx)
+            }
+            Slot::Threshold => {
+                let threshold = self
+                    .threshold
+                    .dragging
+                    .unwrap_or_else(|| fraction(config.vad.threshold, THRESHOLD));
+                let shown = value(threshold, THRESHOLD);
+                let slider = self.slider(
+                    &self.threshold,
+                    threshold,
+                    format!("{shown:.2}"),
+                    |this| &mut this.threshold,
+                    |config, fraction| {
+                        config.vad.threshold = (value(fraction, THRESHOLD) * 100.).round() / 100.
+                    },
+                    cx,
+                );
+                self.row(slot, slider, cx)
+            }
+            Slot::Method => self.method(config, cx),
+            Slot::Profiles => self.profiles(config, cx),
+            Slot::Capitals => {
+                let capitals = config.active_profile().capitals;
+                let picker = Picker::new("capitals", &self.popovers, capitals.name())
+                    .width(Picker::REGULAR)
+                    .items(Capitals::ALL.into_iter().map(|choice| {
+                        MenuItem::new(
+                            SharedString::from(format!("capitals-{choice:?}")),
+                            choice.name(),
+                        )
+                        .selected(choice == capitals)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.edit(cx, |config| config.active_profile_mut().capitals = choice);
+                        }))
+                    }));
+                self.row(slot, picker, cx)
+            }
+            Slot::Periods => {
+                let periods = config.active_profile().periods;
+                let picker = Picker::new("periods", &self.popovers, periods.name())
+                    .width(Picker::REGULAR)
+                    .items(Periods::ALL.into_iter().map(|choice| {
+                        MenuItem::new(
+                            SharedString::from(format!("periods-{choice:?}")),
+                            choice.name(),
+                        )
+                        .selected(choice == periods)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.edit(cx, |config| config.active_profile_mut().periods = choice);
+                        }))
+                    }));
+                self.row(slot, picker, cx)
+            }
+            Slot::SpokenEmoji => {
+                let on = config.active_profile().spoken_emoji;
+                let switch =
+                    Switch::new("spoken-emoji", on).on_click(cx.listener(move |this, _, _, cx| {
+                        this.edit(cx, |config| config.active_profile_mut().spoken_emoji = !on)
+                    }));
+                self.row(slot, switch, cx)
+            }
+            Slot::Laughter => {
+                let on = config.active_profile().join_laughter;
+                let switch = Switch::new("join-laughter", on).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        this.edit(cx, |config| config.active_profile_mut().join_laughter = !on)
+                    },
+                ));
+                self.row(slot, switch, cx)
+            }
+            Slot::Replacements => self.replacements(config, cx),
+            Slot::Theme => self.theme(config, cx),
+            Slot::CustomThemes => {
+                let folder = Button::new("open-themes")
+                    .label("Open folder")
+                    .small()
+                    .outline()
+                    .on_click(|_, _, cx| {
+                        let folder = themes::folder();
+                        if let Err(error) = std::fs::create_dir_all(&folder) {
+                            log::error!("themes: cannot create {}: {error}", folder.display());
+                        }
+                        cx.open_with_system(&folder);
+                    });
+                self.row(slot, folder, cx)
+            }
+            Slot::Position => {
+                let edge = config.pill.edge;
+                let picker = Picker::new("edge", &self.popovers, edge.name())
+                    .width(Picker::NARROW)
+                    .items(PillEdge::ALL.into_iter().map(|choice| {
+                        MenuItem::new(
+                            SharedString::from(format!("edge-{choice:?}")),
+                            choice.name(),
+                        )
+                        .selected(choice == edge)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.edit(cx, |config| config.pill.edge = choice);
+                        }))
+                    }));
+                self.row(slot, picker, cx)
+            }
+            Slot::Distance => {
+                let margin = self
+                    .margin
+                    .dragging
+                    .unwrap_or_else(|| fraction(config.pill.margin, MARGIN));
+                let pixels = value(margin, MARGIN).round();
+                let slider = self.slider(
+                    &self.margin,
+                    margin,
+                    format!("{pixels} px"),
+                    |this| &mut this.margin,
+                    |config, fraction| config.pill.margin = value(fraction, MARGIN).round(),
+                    cx,
+                );
+                self.row(slot, slider, cx)
+            }
+            Slot::Caption => self.switch(slot, "caption", config.pill.caption, cx, |config| {
+                &mut config.pill.caption
+            }),
+            Slot::CancelButton => self.switch(
+                slot,
+                "cancel-button",
+                config.pill.cancel_button,
+                cx,
+                |config| &mut config.pill.cancel_button,
+            ),
+            Slot::ConfirmButton => self.switch(
+                slot,
+                "confirm-button",
+                config.pill.confirm_button,
+                cx,
+                |config| &mut config.pill.confirm_button,
+            ),
+            Slot::Login => self.switch(slot, "login", config.launch_at_login, cx, |config| {
+                &mut config.launch_at_login
+            }),
+            Slot::Tray => self.switch(slot, "tray", config.tray, cx, |config| &mut config.tray),
+            Slot::Unload => self.unload(config, cx),
+            Slot::AutoUpdates => self.switch(
+                slot,
+                "automatic-updates",
+                config.check_for_updates,
+                cx,
+                |config| &mut config.check_for_updates,
+            ),
+            Slot::Updates => {
+                let button = Button::new("check-updates")
+                    .label("Check for updates")
+                    .small()
+                    .outline()
+                    .on_click(|_, _, cx| Host::global(cx).dispatch(crate::Action::Updates, cx));
+                self.row(slot, button, cx)
+            }
+            Slot::Memory => {
+                let memory = chrome::size(self.usage.memory);
+                self.row(slot, reading(memory, cx), cx)
+            }
+            Slot::GraphicsMemory => {
+                let weights = ModelId::parse(&config.model).and_then(|id| {
+                    match self.library.read(cx).state(&id) {
+                        ModelState::Installed { bytes } => Some(bytes),
+                        _ => None,
+                    }
+                });
+                let shown = weights
+                    .map(|bytes| format!("about {}", chrome::size(bytes)))
+                    .unwrap_or_else(|| "Unknown".to_owned());
+                self.row(slot, reading(shown, cx), cx)
+            }
+            Slot::Processor => {
+                let cpu = match self.usage.cpu {
+                    Some(cpu) => format!("{cpu:.0}% of a core"),
+                    None => "Measuring".to_string(),
+                };
+                self.row(slot, reading(cpu, cx), cx)
+            }
+            Slot::Version => self.row(slot, div(), cx),
+        }
+    }
+
+    /// A row with a switch that flips one boolean in the config.
+    fn switch(
+        &self,
+        slot: Slot,
+        id: &'static str,
+        on: bool,
+        cx: &mut Context<Self>,
+        field: fn(&mut Config) -> &mut bool,
+    ) -> AnyElement {
+        let switch = Switch::new(id, on).on_click(cx.listener(move |this, _, _, cx| {
+            this.edit(cx, |config| *field(config) = !on);
+        }));
+        self.row(slot, switch, cx)
+    }
+
+    fn microphone(&self, config: &Config, cx: &mut Context<Self>) -> AnyElement {
         let device = config.input_device.clone();
         let device_name = device
             .as_ref()
@@ -277,95 +937,11 @@ impl Settings {
                 this.edit(cx, |config| config.input_device = Some(id));
             }))
         });
-        let device_picker = Picker::new("device", &self.popovers, device_name)
+        let picker = Picker::new("device", &self.popovers, device_name)
             .menu(device_menu("device-menu", &self.device_scrollbar))
             .item(default_item)
             .items(device_items.collect::<Vec<_>>());
-
-        let mut rows =
-            vec![setting("Microphone", device_picker.into_any_element(), cx).into_any_element()];
-        // Drafts at the cursor need the Wayland input method. Elsewhere Tokativ registers the
-        // hotkey itself, so that is the setting in its place.
-        #[cfg(target_os = "linux")]
-        {
-            let live = config.live_preview;
-            let live_switch = Switch::new("live-preview", live)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.edit(cx, |config| config.live_preview = !live);
-                }))
-                .into_any_element();
-            rows.insert(
-                0,
-                row(
-                    "Live text",
-                    "A draft at the cursor while you speak. Needs the input method.",
-                    live_switch,
-                    cx,
-                )
-                .into_any_element(),
-            );
-        }
-        #[cfg(not(target_os = "linux"))]
-        rows.insert(0, self.hotkey(cx));
-        group(None, rows, cx)
-    }
-
-    /// The hotkey that starts and confirms a session, recorded by pressing it.
-    #[cfg(not(target_os = "linux"))]
-    fn hotkey(&self, cx: &mut Context<Self>) -> AnyElement {
-        setting("Hotkey", self.hotkey.clone().into_any_element(), cx).into_any_element()
-    }
-
-    fn detection(&self, config: &Config, cx: &mut Context<Self>) -> impl IntoElement {
-        let silence = self
-            .silence
-            .dragging
-            .unwrap_or_else(|| fraction(config.vad.silence_ms as f32, SILENCE_MS));
-        let silence_ms = value(silence, SILENCE_MS).round() as u32;
-        let threshold = self
-            .threshold
-            .dragging
-            .unwrap_or_else(|| fraction(config.vad.threshold, THRESHOLD));
-        let threshold_value = value(threshold, THRESHOLD);
-
-        group(
-            Some("Voice detection"),
-            vec![
-                setting(
-                    "Pause length",
-                    self.slider(
-                        &self.silence,
-                        silence,
-                        format!("{silence_ms} ms"),
-                        |this| &mut this.silence,
-                        |config, fraction| {
-                            config.vad.silence_ms = value(fraction, SILENCE_MS).round() as u32
-                        },
-                        cx,
-                    ),
-                    cx,
-                )
-                .into_any_element(),
-                row(
-                    "Speech threshold",
-                    "Higher ignores more noise but may clip quiet words.",
-                    self.slider(
-                        &self.threshold,
-                        threshold,
-                        format!("{threshold_value:.2}"),
-                        |this| &mut this.threshold,
-                        |config, fraction| {
-                            config.vad.threshold =
-                                (value(fraction, THRESHOLD) * 100.).round() / 100.
-                        },
-                        cx,
-                    ),
-                    cx,
-                )
-                .into_any_element(),
-            ],
-            cx,
-        )
+        self.row(Slot::Microphone, picker, cx)
     }
 
     /// A slider row's control: the scrubber and the value beside it.
@@ -378,7 +954,7 @@ impl Settings {
         field: fn(&mut Self) -> &mut Slider,
         save: fn(&mut Config, f32),
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> AnyElement {
         let theme = cx.theme();
         div()
             .flex()
@@ -411,12 +987,7 @@ impl Settings {
             .into_any_element()
     }
 
-    fn insertion(&self, config: &Config, cx: &mut Context<Self>) -> impl IntoElement {
-        let status = self.status.read(cx);
-        let note = status
-            .note
-            .as_ref()
-            .map(|note| format!("Using {}, because {note}.", status.method.to_lowercase()));
+    fn method(&self, config: &Config, cx: &mut Context<Self>) -> AnyElement {
         let backend = config.insertion.backend;
         let picker = Picker::new("backend", &self.popovers, backend.name())
             .width(Picker::REGULAR)
@@ -438,17 +1009,10 @@ impl Settings {
                         }))
                     }),
             );
-        group(
-            Some("Typing"),
-            vec![match note {
-                Some(note) => row("Method", note, picker.into_any_element(), cx).into_any_element(),
-                None => setting("Method", picker.into_any_element(), cx).into_any_element(),
-            }],
-            cx,
-        )
+        self.row(Slot::Method, picker, cx)
     }
 
-    fn appearance(&self, config: &Config, cx: &mut Context<Self>) -> impl IntoElement {
+    fn theme(&self, config: &Config, cx: &mut Context<Self>) -> AnyElement {
         let current = config.theme.clone();
         let known = themes::name(&current, cx);
         let pick = |id: String, label: String, cx: &mut Context<Self>| {
@@ -485,120 +1049,17 @@ impl Settings {
         let picker = Picker::new("theme", &self.popovers, shown)
             .width(Picker::REGULAR)
             .items(items);
-        let folder = Button::new("open-themes")
-            .label("Open folder")
-            .small()
-            .outline()
-            .on_click(|_, _, cx| {
-                let folder = themes::folder();
-                if let Err(error) = std::fs::create_dir_all(&folder) {
-                    log::error!("themes: cannot create {}: {error}", folder.display());
-                }
-                cx.open_with_system(&folder);
-            });
-        group(
-            Some("Appearance"),
-            vec![
-                setting("Theme", picker.into_any_element(), cx).into_any_element(),
-                row(
-                    "Custom themes",
-                    "JSON files in the themes folder, in the format Sonora reads. A saved file shows up in the list right away.",
-                    folder.into_any_element(),
-                    cx,
-                )
-                .into_any_element(),
-            ],
-            cx,
-        )
+        self.row(Slot::Theme, picker, cx)
     }
 
-    fn pill(&self, config: &Config, cx: &mut Context<Self>) -> impl IntoElement {
-        let edge = config.pill.edge;
-        let caption = config.pill.caption;
-        let cancel_button = config.pill.cancel_button;
-        let confirm_button = config.pill.confirm_button;
-        let picker = Picker::new("edge", &self.popovers, edge.name())
-            .width(Picker::NARROW)
-            .items(PillEdge::ALL.into_iter().map(|choice| {
-                MenuItem::new(
-                    SharedString::from(format!("edge-{choice:?}")),
-                    choice.name(),
-                )
-                .selected(choice == edge)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.edit(cx, |config| config.pill.edge = choice);
-                }))
-            }));
-        let margin = self
-            .margin
-            .dragging
-            .unwrap_or_else(|| fraction(config.pill.margin, MARGIN));
-        let pixels = value(margin, MARGIN).round();
-        group(
-            Some("Pill"),
-            vec![
-                setting("Position", picker.into_any_element(), cx).into_any_element(),
-                setting(
-                    "Distance from the edge",
-                    self.slider(
-                        &self.margin,
-                        margin,
-                        format!("{pixels} px"),
-                        |this| &mut this.margin,
-                        |config, fraction| config.pill.margin = value(fraction, MARGIN).round(),
-                        cx,
-                    ),
-                    cx,
-                )
-                .into_any_element(),
-                row(
-                    "Live caption",
-                    "A floating text window below the top pill or above the bottom pill.",
-                    Switch::new("caption", caption)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.edit(cx, |config| config.pill.caption = !caption);
-                        }))
-                        .into_any_element(),
-                    cx,
-                )
-                .into_any_element(),
-                row(
-                    "Cancel button",
-                    "The cross on the left. Escape cancels without it.",
-                    Switch::new("cancel-button", cancel_button)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.edit(cx, |config| config.pill.cancel_button = !cancel_button);
-                        }))
-                        .into_any_element(),
-                    cx,
-                )
-                .into_any_element(),
-                row(
-                    "Confirm button",
-                    "The check mark on the right. Enter or the hotkey finishes without it.",
-                    Switch::new("confirm-button", confirm_button)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.edit(cx, |config| config.pill.confirm_button = !confirm_button);
-                        }))
-                        .into_any_element(),
-                    cx,
-                )
-                .into_any_element(),
-            ],
-            cx,
-        )
-    }
-
-    fn system(&self, config: &Config, cx: &mut Context<Self>) -> impl IntoElement {
-        let login = config.launch_at_login;
-        let tray = config.tray;
+    fn unload(&self, config: &Config, cx: &mut Context<Self>) -> AnyElement {
         let idle = config.models.unload_after_minutes;
         let idle_name = |minutes: u32| match minutes {
             0 => "Never".to_string(),
             minutes => format!("After {minutes} min"),
         };
-        let idle_picker = Picker::new("idle", &self.popovers, idle_name(idle))
-            .width(Picker::NARROW)
+        let picker = Picker::new("idle", &self.popovers, idle_name(idle))
+            .width(Picker::REGULAR)
             .items(IDLE_MINUTES.into_iter().map(|minutes| {
                 MenuItem::new(
                     SharedString::from(format!("idle-{minutes}")),
@@ -609,78 +1070,175 @@ impl Settings {
                     this.edit(cx, |config| config.models.unload_after_minutes = minutes);
                 }))
             }));
-        let mut rows = vec![
-            row(
-                "Launch at login",
-                "Not needed with the Home Manager service.",
-                Switch::new("login", login)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.edit(cx, |config| config.launch_at_login = !login);
-                    }))
-                    .into_any_element(),
-                cx,
+        self.row(Slot::Unload, picker, cx)
+    }
+
+    /// The models to choose from. Clicking an installed model makes it the one sessions use.
+    fn models(&self, config: &Config, cx: &mut Context<Self>) -> AnyElement {
+        let chosen = ModelId::parse(&config.model);
+        let listed = models::listed(self.library.read(cx), chosen.as_slice());
+        let rows = listed.into_iter().map(|model| {
+            let id = model.id.clone();
+            let radio = Radio::new(
+                SharedString::from(format!("use-{}", id.key())),
+                Some(&id) == chosen.as_ref(),
             )
-            .into_any_element(),
-            setting(
-                "Tray icon",
-                Switch::new("tray", tray)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.edit(cx, |config| config.tray = !tray);
-                    }))
-                    .into_any_element(),
-                cx,
-            )
-            .into_any_element(),
-            row(
-                "Unload models",
-                "Frees memory between sessions. The next one starts a moment later.",
-                idle_picker.into_any_element(),
-                cx,
-            )
-            .into_any_element(),
-        ];
-        if cfg!(not(target_os = "linux")) {
-            let automatic = config.check_for_updates;
-            rows.push(
-                setting(
-                    "Automatic update checks",
-                    Switch::new("automatic-updates", automatic)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.edit(cx, |config| config.check_for_updates = !automatic)
-                        }))
-                        .into_any_element(),
+            .into_any_element();
+            let key = id.key();
+            let choose = cx.listener(move |this, _, _, cx| {
+                let key = key.clone();
+                this.edit(cx, |config| config.model = key);
+            });
+            div()
+                .mx(-HOVER_REACH)
+                .child(models::model_row(
+                    model,
+                    &self.library,
+                    Some(radio),
+                    Some(Box::new(choose)),
+                    HOVER_REACH,
+                    cx.theme().radius,
+                    cx,
+                ))
+                .into_any_element()
+        });
+        div()
+            .flex()
+            .flex_col()
+            .py_2()
+            .children(rows)
+            .into_any_element()
+    }
+
+    /// The row that opens the model search, marked with a magnifier.
+    fn explore_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (title, detail) = self.meta(Slot::Explore, cx).unwrap_or_default();
+        let icon = |path: &str, size: f32| {
+            svg()
+                .path(icons::path(path))
+                .size(px(size))
+                .flex_none()
+                .text_color(theme.muted_foreground)
+        };
+        let entry = hovered(
+            "explore-models",
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(icon("icons/search.svg", 16.))
+                .child(labels(title, detail, cx))
+                .child(icon("icons/chevron-right.svg", 16.)),
+            cx,
+        )
+        .on_click(cx.listener(|this, _, window, cx| this.explore(true, window, cx)));
+        div().mx(-HOVER_REACH).child(entry).into_any_element()
+    }
+
+    fn runtime(&self, config: &Config, cx: &mut Context<Self>) -> AnyElement {
+        let processor = config.processor;
+        let picker = Picker::new("processor", &self.popovers, processor.name())
+            .width(Picker::REGULAR)
+            .items(Processor::ALL.into_iter().map(|choice| {
+                MenuItem::new(
+                    SharedString::from(format!("processor-{choice:?}")),
+                    choice.name(),
+                )
+                .selected(choice == processor)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.edit(cx, |config| config.processor = choice);
+                }))
+            }));
+        self.row(Slot::Runtime, picker, cx)
+    }
+
+    /// The names and terms the model is asked to spell as written, and whether the model in use
+    /// takes them at all.
+    fn vocabulary(&self, config: &Config, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let ignored = self
+            .status
+            .read(cx)
+            .abilities
+            .is_some_and(|abilities| !abilities.vocabulary);
+        let items: Vec<AnyElement> = config
+            .vocabulary
+            .iter()
+            .enumerate()
+            .map(|(index, term)| {
+                let remove = cx.listener(move |this, _, _, cx| {
+                    this.edit(cx, |config| {
+                        if index < config.vocabulary.len() {
+                            config.vocabulary.remove(index);
+                        }
+                    });
+                });
+                item(
+                    SharedString::from(format!("remove-term-{index}")),
+                    div().child(term.clone()),
+                    remove,
                     cx,
                 )
-                .into_any_element(),
-            );
-            rows.push(
-                setting(
-                    "Updates",
-                    Button::new("check-updates")
-                        .label("Check for updates")
-                        .secondary()
-                        .on_click(|_, _, cx| Host::global(cx).dispatch(crate::Action::Updates, cx))
-                        .into_any_element(),
-                    cx,
-                )
-                .into_any_element(),
-            );
+            })
+            .collect();
+        let add = Button::new("add-term")
+            .label("Add")
+            .small()
+            .outline()
+            .on_click(cx.listener(|this, _, window, cx| this.add_term(window, cx)));
+        let note = ignored.then(|| {
+            let name = ModelId::parse(&config.model)
+                .map(|id| models::Described::of(id).name)
+                .unwrap_or_else(|| "This model".to_owned());
+            div()
+                .text_size(theme.text(Text::Small))
+                .text_color(theme.muted_foreground)
+                .child(format!(
+                    "{name} does not use the vocabulary. Whisper and Qwen3-ASR do, and they also follow the text before each phrase."
+                ))
+        });
+        self.listing(
+            Slot::Vocabulary,
+            items,
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(div().flex_1().min_w_0().child(self.term.clone()))
+                .child(div().flex_none().child(add)),
+            note,
+            cx,
+        )
+    }
+
+    /// Adds the term typed into the field and clears it.
+    fn add_term(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let term = self.term.read(cx).text().trim().to_owned();
+        if term.is_empty() {
+            return;
         }
-        group(Some("System"), rows, cx)
+        self.edit(cx, |config| {
+            if !config.vocabulary.contains(&term) {
+                config.vocabulary.push(term)
+            }
+        });
+        self.term.update(cx, |input, cx| input.set_text("", cx));
+        let focus = self.term.focus_handle(cx);
+        focus.focus(window, cx);
     }
 
     /// Every profile with the one in use marked, and the field that names a new profile or
     /// renames the one in use.
-    fn profiles(&self, config: &Config, cx: &mut Context<Self>) -> impl IntoElement {
+    fn profiles(&self, config: &Config, cx: &mut Context<Self>) -> AnyElement {
         let active = config.active_profile().name.clone();
         let removable = config.profiles.len() > 1;
-        let mut rows: Vec<AnyElement> = config
+        let items: Vec<AnyElement> = config
             .profiles
             .iter()
             .enumerate()
             .map(|(index, profile)| {
                 let name = profile.name.clone();
-                let chosen = name == active;
                 let choose = {
                     let name = name.clone();
                     cx.listener(move |this, _, _, cx| {
@@ -692,6 +1250,7 @@ impl Settings {
                     .icon("icons/x.svg")
                     .small()
                     .ghost()
+                    .tint(cx.theme().muted_foreground)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.edit(cx, |config| {
                             if index < config.profiles.len() && config.profiles.len() > 1 {
@@ -700,22 +1259,25 @@ impl Settings {
                         });
                     }));
                 div()
-                    .id(SharedString::from(format!("profile-{index}")))
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .px(chrome::GROUP_PADDING)
-                    .py_2()
-                    .cursor_pointer()
-                    .on_click(choose)
-                    .child(Radio::new(
-                        SharedString::from(format!("use-profile-{index}")),
-                        chosen,
-                    ))
-                    .child(div().flex_1().min_w_0().child(name))
-                    .when(removable, |this| {
-                        this.child(div().flex_none().child(remove))
-                    })
+                    .mx(-HOVER_REACH)
+                    .child(
+                        hovered(
+                            SharedString::from(format!("profile-{index}")),
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .child(Radio::new(
+                                    SharedString::from(format!("use-profile-{index}")),
+                                    name == active,
+                                ))
+                                .child(div().flex_1().min_w_0().child(name))
+                                .when(removable, |this| this.child(remove)),
+                            cx,
+                        )
+                        .py_1()
+                        .on_click(choose),
+                    )
                     .into_any_element()
             })
             .collect();
@@ -729,19 +1291,19 @@ impl Settings {
             .small()
             .outline()
             .on_click(cx.listener(|this, _, _, cx| this.name_profile(true, cx)));
-        rows.push(
+        self.listing(
+            Slot::Profiles,
+            items,
             div()
                 .flex()
                 .items_center()
                 .gap_2()
-                .px(chrome::GROUP_PADDING)
-                .py_3()
                 .child(div().flex_1().min_w_0().child(self.profile_name.clone()))
                 .child(div().flex_none().child(rename))
-                .child(div().flex_none().child(add))
-                .into_any_element(),
-        );
-        group(Some("Profiles"), rows, cx)
+                .child(div().flex_none().child(add)),
+            None::<gpui::Div>,
+            cx,
+        )
     }
 
     /// Adds a copy of the profile in use under the name typed in the field and switches to it,
@@ -774,130 +1336,62 @@ impl Settings {
             .update(cx, |input, cx| input.set_text("", cx));
     }
 
-    /// The rules the profile in use rewrites each phrase by before it is inserted.
-    fn style(&self, config: &Config, cx: &mut Context<Self>) -> impl IntoElement {
-        let style = config.active_profile().clone();
-        let capitals = style.capitals;
-        let capitals_picker = Picker::new("capitals", &self.popovers, capitals.name())
-            .width(Picker::REGULAR)
-            .items(Capitals::ALL.into_iter().map(|choice| {
-                MenuItem::new(
-                    SharedString::from(format!("capitals-{choice:?}")),
-                    choice.name(),
-                )
-                .selected(choice == capitals)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.edit(cx, |config| config.active_profile_mut().capitals = choice);
-                }))
-            }));
-        let periods = style.periods;
-        let periods_picker = Picker::new("periods", &self.popovers, periods.name())
-            .width(Picker::REGULAR)
-            .items(Periods::ALL.into_iter().map(|choice| {
-                MenuItem::new(
-                    SharedString::from(format!("periods-{choice:?}")),
-                    choice.name(),
-                )
-                .selected(choice == periods)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.edit(cx, |config| config.active_profile_mut().periods = choice);
-                }))
-            }));
-        let laughter = style.join_laughter;
-        let spoken_emoji = style.spoken_emoji;
-        let mut rows = vec![
-            setting("Capitals", capitals_picker.into_any_element(), cx).into_any_element(),
-            row(
-                "Periods",
-                "Question and exclamation marks always stay.",
-                periods_picker.into_any_element(),
-                cx,
-            )
-            .into_any_element(),
-            row(
-                "Spoken emoji",
-                "“Thumbs up emoji” → 👍. Names in 140+ languages.",
-                Switch::new("spoken-emoji", spoken_emoji)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.edit(cx, |config| {
-                            config.active_profile_mut().spoken_emoji = !spoken_emoji
-                        });
-                    }))
-                    .into_any_element(),
-                cx,
-            )
-            .into_any_element(),
-            setting(
-                "Laughter as one word",
-                Switch::new("join-laughter", laughter)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.edit(cx, |config| {
-                            config.active_profile_mut().join_laughter = !laughter
-                        });
-                    }))
-                    .into_any_element(),
-                cx,
-            )
-            .into_any_element(),
-        ];
+    /// The fixed rewrites of the profile in use, and the two fields that add one.
+    fn replacements(&self, config: &Config, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        rows.extend(
-            style
-                .replacements
-                .iter()
-                .enumerate()
-                .map(|(index, replacement)| {
-                    let remove =
-                        Button::new(SharedString::from(format!("remove-replacement-{index}")))
-                            .icon("icons/x.svg")
-                            .small()
-                            .ghost()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.edit(cx, |config| {
-                                    let replacements =
-                                        &mut config.active_profile_mut().replacements;
-                                    if index < replacements.len() {
-                                        replacements.remove(index);
-                                    }
-                                });
-                            }));
+        let arrow = || {
+            svg()
+                .path(icons::path("icons/chevron-right.svg"))
+                .size(px(14.))
+                .flex_none()
+                .text_color(theme.muted_foreground)
+        };
+        let items: Vec<AnyElement> = config
+            .active_profile()
+            .replacements
+            .iter()
+            .enumerate()
+            .map(|(index, replacement)| {
+                let remove = cx.listener(move |this, _, _, cx| {
+                    this.edit(cx, |config| {
+                        let replacements = &mut config.active_profile_mut().replacements;
+                        if index < replacements.len() {
+                            replacements.remove(index);
+                        }
+                    });
+                });
+                item(
+                    SharedString::from(format!("remove-replacement-{index}")),
                     div()
                         .flex()
                         .items_center()
                         .gap_3()
-                        .px(chrome::GROUP_PADDING)
-                        .py_2()
                         .child(div().flex_1().min_w_0().child(replacement.from.clone()))
-                        .child(
-                            gpui::svg()
-                                .path(icons::path("icons/chevron-right.svg"))
-                                .size(px(14.))
-                                .flex_none()
-                                .text_color(theme.muted_foreground),
-                        )
-                        .child(div().flex_1().min_w_0().child(replacement.to.clone()))
-                        .child(div().flex_none().child(remove))
-                        .into_any_element()
-                }),
-        );
+                        .child(arrow())
+                        .child(div().flex_1().min_w_0().child(replacement.to.clone())),
+                    remove,
+                    cx,
+                )
+            })
+            .collect();
         let add = Button::new("add-replacement")
             .label("Add")
             .small()
             .outline()
             .on_click(cx.listener(|this, _, window, cx| this.add_replacement(window, cx)));
-        rows.push(
+        self.listing(
+            Slot::Replacements,
+            items,
             div()
                 .flex()
                 .items_center()
                 .gap_2()
-                .px(chrome::GROUP_PADDING)
-                .py_3()
                 .child(div().flex_1().min_w_0().child(self.replace_from.clone()))
                 .child(div().flex_1().min_w_0().child(self.replace_to.clone()))
-                .child(div().flex_none().child(add))
-                .into_any_element(),
-        );
-        group(Some(&style.name), rows, cx).into_any_element()
+                .child(div().flex_none().child(add)),
+            None::<gpui::Div>,
+            cx,
+        )
     }
 
     /// Adds the replacement typed into the two fields and clears them.
@@ -920,275 +1414,57 @@ impl Settings {
         focus.focus(window, cx);
     }
 
-    /// The names and terms the model is asked to spell as written, and whether the model in use
-    /// takes them at all.
-    fn vocabulary(&self, config: &Config, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let ignored = self
-            .status
-            .read(cx)
-            .abilities
-            .is_some_and(|abilities| !abilities.vocabulary);
-        let mut rows: Vec<AnyElement> = config
-            .vocabulary
-            .iter()
-            .enumerate()
-            .map(|(index, term)| {
-                let remove = Button::new(SharedString::from(format!("remove-term-{index}")))
-                    .icon("icons/x.svg")
-                    .small()
-                    .ghost()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.edit(cx, |config| {
-                            if index < config.vocabulary.len() {
-                                config.vocabulary.remove(index);
-                            }
-                        });
-                    }));
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .px(chrome::GROUP_PADDING)
-                    .py_2()
-                    .child(div().flex_1().min_w_0().child(term.clone()))
-                    .child(div().flex_none().child(remove))
-                    .into_any_element()
+    /// A row that holds a list: the slot's title and detail, the items under them, then the
+    /// fields that add one and a note when there is one.
+    fn listing(
+        &self,
+        slot: Slot,
+        items: Vec<AnyElement>,
+        adder: impl IntoElement,
+        note: Option<impl IntoElement>,
+        cx: &App,
+    ) -> AnyElement {
+        let (title, detail) = self.meta(slot, cx).unwrap_or_default();
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .py_3()
+            .child(labels(title, detail, cx))
+            .when(!items.is_empty(), |this| {
+                this.child(div().flex().flex_col().children(items))
             })
-            .collect();
-        let add = Button::new("add-term")
-            .label("Add")
-            .small()
-            .outline()
-            .on_click(cx.listener(|this, _, window, cx| this.add_term(window, cx)));
-        rows.push(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .px(chrome::GROUP_PADDING)
-                .py_3()
-                .child(div().flex_1().min_w_0().child(self.term.clone()))
-                .child(div().flex_none().child(add))
-                .into_any_element(),
-        );
-        if ignored {
-            let name = ModelId::parse(&config.model)
-                .map(|id| models::Described::of(id).name)
-                .unwrap_or_else(|| "This model".to_owned());
-            rows.push(
-                div()
-                    .px(chrome::GROUP_PADDING)
-                    .py_3()
-                    .text_size(theme.text(Text::Small))
-                    .text_color(theme.muted_foreground)
-                    .child(format!(
-                        "{name} does not use the vocabulary. Whisper and Qwen3-ASR do, and they also follow the text before each phrase."
-                    ))
-                    .into_any_element(),
-            );
-        }
-        group(Some("Vocabulary"), rows, cx)
+            .child(adder)
+            .children(note)
+            .into_any_element()
     }
 
-    /// Adds the term typed into the field and clears it.
-    fn add_term(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let term = self.term.read(cx).text().trim().to_owned();
-        if term.is_empty() {
-            return;
-        }
-        self.edit(cx, |config| {
-            if !config.vocabulary.contains(&term) {
-                config.vocabulary.push(term)
-            }
-        });
-        self.term.update(cx, |input, cx| input.set_text("", cx));
-        let focus = self.term.focus_handle(cx);
-        focus.focus(window, cx);
-    }
-
-    /// The daemon's own memory and processor use, refreshed every second.
-    fn resources(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let value = |text: String| {
-            div()
-                .text_size(theme.text(Text::Small))
-                .text_color(theme.muted_foreground)
-                .child(text)
-                .into_any_element()
-        };
-        let memory = chrome::size(self.usage.memory);
-        let device = self.status.read(cx).device.clone();
-        let on_gpu = device.as_ref().is_some_and(|device| device.gpu);
-        let weights =
-            ModelId::parse(&self.store.read(cx).config().model).and_then(|id| {
-                match self.library.read(cx).state(&id) {
-                    ModelState::Installed { bytes } => Some(bytes),
-                    _ => None,
-                }
-            });
-        let memory_detail = match on_gpu {
-            true => "The app itself. The model's weights sit on the graphics card instead.",
-            false => "The app and the model's weights, which run on the CPU.",
-        };
-        let cpu = match self.usage.cpu {
-            Some(cpu) => format!("{cpu:.0}% of a core"),
-            None => "Measuring".to_string(),
-        };
-        group(
-            Some("Resources"),
-            [
-                Some(row("Memory", memory_detail, value(memory), cx).into_any_element()),
-                weights.filter(|_| on_gpu).map(|bytes| {
-                    setting(
-                        "Graphics memory",
-                        value(format!("about {}", chrome::size(bytes))),
-                        cx,
-                    )
-                    .into_any_element()
-                }),
-                Some(setting("Processor", value(cpu), cx).into_any_element()),
-            ]
-            .into_iter()
-            .flatten()
-            .collect(),
-            cx,
-        )
-    }
-
-    /// The models to choose from, with the device they run on. Clicking an installed model makes
-    /// it the one sessions use.
-    fn models(&self, config: &Config, cx: &mut Context<Self>) -> impl IntoElement {
-        let chosen = ModelId::parse(&config.model);
-        let listed = models::listed(self.library.read(cx), chosen.as_slice());
-        let mut rows: Vec<AnyElement> = listed
-            .into_iter()
-            .map(|model| {
-                let id = model.id.clone();
-                let radio = Radio::new(
-                    SharedString::from(format!("use-{}", id.key())),
-                    Some(&id) == chosen.as_ref(),
-                )
-                .into_any_element();
-                let key = id.key();
-                let choose = cx.listener(move |this, _, _, cx| {
-                    let key = key.clone();
-                    this.edit(cx, |config| config.model = key);
-                });
-                models::model_row(
-                    model,
-                    &self.library,
-                    Some(radio),
-                    Some(Box::new(choose)),
-                    cx,
-                )
-            })
-            .collect();
-
-        let processor = config.processor;
-        let picker = Picker::new("processor", &self.popovers, processor.name())
-            .width(Picker::REGULAR)
-            .items(Processor::ALL.into_iter().map(|choice| {
-                MenuItem::new(
-                    SharedString::from(format!("processor-{choice:?}")),
-                    choice.name(),
-                )
-                .selected(choice == processor)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.edit(cx, |config| config.processor = choice);
-                }))
-            }));
-        rows.push(setting("Run on", picker.into_any_element(), cx).into_any_element());
-        group(None, rows, cx)
-    }
-
-    /// Search over Hugging Face for any model the engine can run. Results and a repository's
-    /// files are virtualized lists, so only the rows in view are drawn.
-    fn find(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
-        let library = self.library.read(cx);
-        let search = &library.search;
-        let field = div().flex_none().child(self.search_input.clone());
-
-        if let Some(repo) = self.opened.clone() {
-            let found = search
-                .results
-                .iter()
-                .find(|repository| repository.id == repo)
-                .cloned();
-            let files = match search.files.get(&repo) {
-                Some(Files::Loaded(files)) => Some(files.clone()),
-                _ => None,
-            };
-            let waiting = match search.files.get(&repo) {
-                None | Some(Files::Loading) => Some("Listing files".to_string()),
-                Some(Files::Failed(error)) => Some(format!("Cannot list files: {error}")),
-                Some(Files::Loaded(files)) if files.is_empty() => {
-                    Some("No GGUF files in this repository".to_string())
-                }
-                Some(Files::Loaded(_)) => None,
-            };
-            let back = Button::new("back-to-results")
-                .label("Results")
+    /// Search over Hugging Face for any model the engine can run, in place of the model
+    /// category. Results and a repository's files are virtualized lists, so only the rows in
+    /// view are drawn.
+    fn explorer(&self, cx: &mut Context<Self>) -> AnyElement {
+        let back = |label: &'static str, cx: &mut Context<Self>| {
+            Button::new("explore-back")
+                .label(label)
                 .icon("icons/chevron-left.svg")
                 .small()
                 .ghost()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.opened = None;
-                    cx.notify();
-                }));
-            let header = div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(div().flex().child(back))
-                .child(
-                    div()
-                        .text_size(theme.text(Text::Large))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child(repo.clone()),
+                .on_click(
+                    cx.listener(|this, _, window, cx| match this.opened.is_some() {
+                        true => {
+                            this.opened = None;
+                            cx.notify();
+                        }
+                        false => this.explore(false, window, cx),
+                    }),
                 )
-                .when_some(found.as_ref(), |this, repository| {
-                    this.child(models::facts(repository, cx))
-                });
-            let list = match files {
-                Some(files) => {
-                    let count = files.len();
-                    let repo = repo.clone();
-                    let rows = uniform_list(
-                        "repository-files",
-                        count,
-                        cx.processor(move |this, range: Range<usize>, _, cx| {
-                            range
-                                .map(|index| {
-                                    models::file_row(&repo, &files[index], &this.library, cx)
-                                })
-                                .collect::<Vec<_>>()
-                        }),
-                    )
-                    .track_scroll(&self.files_scroll)
-                    .size_full();
-                    listed(
-                        Scroller::listing("repository-files-scroll", &self.files_scrollbar)
-                            .child(rows)
-                            .into_any_element(),
-                        cx,
-                    )
-                }
-                None => hint(&waiting.unwrap_or_default(), cx),
-            };
-            return div()
-                .flex()
-                .flex_col()
-                .gap_4()
-                .size_full()
-                .child(header)
-                .child(list)
-                .into_any_element();
-        }
+        };
 
+        let theme = *cx.theme();
+        let search = &self.library.read(cx).search;
+        let results = search.results.clone();
         let note = if search.query.trim().is_empty() {
-            Some("Search for Whisper, Parakeet, Canary, GigaAM, Moonshine, Qwen3-ASR, Voxtral and more. Only models in GGUF form that run here are listed.".to_string())
+            Some("Whisper, Parakeet, Canary, GigaAM, Moonshine, Qwen3-ASR, Voxtral and more. Only models in GGUF form that run here are listed.".to_string())
         } else if search.loading && search.results.is_empty() {
             Some("Searching".to_string())
         } else if let Some(error) = &search.error {
@@ -1198,54 +1474,135 @@ impl Settings {
         } else {
             None
         };
-        let results = search.results.clone();
-        let list = match note {
-            Some(note) => hint(&note, cx),
-            None => {
-                let count = results.len();
-                let rows = uniform_list(
-                    "search-results",
-                    count,
-                    cx.processor(move |_, range: Range<usize>, _, cx| {
-                        range
-                            .map(|index| {
-                                let repository = &results[index];
-                                let repo = repository.id.clone();
-                                let open = cx.listener(move |this, _, _, cx| {
-                                    this.library.update(cx, |library, cx| {
-                                        library.open_repository(repo.clone(), cx)
-                                    });
-                                    this.opened = Some(repo.clone());
-                                    cx.notify();
-                                });
-                                models::result_row(repository, Box::new(open), cx)
-                            })
-                            .collect::<Vec<_>>()
-                    }),
-                )
-                .track_scroll(&self.results_scroll)
-                .size_full();
-                listed(
-                    Scroller::listing("search-results-scroll", &self.results_scrollbar)
-                        .child(rows)
-                        .into_any_element(),
-                    cx,
-                )
+        let files = self
+            .opened
+            .as_ref()
+            .map(|repo| match search.files.get(repo) {
+                Some(Files::Loaded(files)) if !files.is_empty() => Ok(files.clone()),
+                None | Some(Files::Loading) => Err("Listing files".to_string()),
+                Some(Files::Failed(error)) => Err(format!("Cannot list files: {error}")),
+                Some(Files::Loaded(_)) => Err("No GGUF files in this repository".to_string()),
+            });
+
+        let (top, list) = match (self.opened.clone(), files) {
+            (Some(repo), Some(files)) => {
+                let found = results
+                    .iter()
+                    .find(|repository| repository.id == repo)
+                    .cloned();
+                let top = div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(div().flex().child(back("Results", cx)))
+                    .child(
+                        div()
+                            .text_size(theme.text(Text::Large))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(repo.clone()),
+                    )
+                    .when_some(found.as_ref(), |this, repository| {
+                        this.child(models::facts(repository, cx))
+                    })
+                    .into_any_element();
+                let list = match files {
+                    Ok(files) => {
+                        let count = files.len();
+                        let rows = uniform_list(
+                            "repository-files",
+                            count,
+                            cx.processor(move |this, range: Range<usize>, _, cx| {
+                                range
+                                    .map(|index| {
+                                        models::file_row(&repo, &files[index], &this.library, cx)
+                                    })
+                                    .collect::<Vec<_>>()
+                            }),
+                        )
+                        .track_scroll(&self.files_scroll)
+                        .size_full();
+                        listed(
+                            Scroller::listing("repository-files-scroll", &self.files_scrollbar)
+                                .child(rows)
+                                .into_any_element(),
+                            cx,
+                        )
+                    }
+                    Err(waiting) => hint(&waiting, cx),
+                };
+                (top, list)
+            }
+            _ => {
+                let list = match note {
+                    Some(note) => hint(&note, cx),
+                    None => {
+                        let count = results.len();
+                        let rows = uniform_list(
+                            "search-results",
+                            count,
+                            cx.processor(move |_, range: Range<usize>, _, cx| {
+                                range
+                                    .map(|index| {
+                                        let repository = &results[index];
+                                        let repo = repository.id.clone();
+                                        let open = cx.listener(move |this, _, _, cx| {
+                                            this.library.update(cx, |library, cx| {
+                                                library.open_repository(repo.clone(), cx)
+                                            });
+                                            this.opened = Some(repo.clone());
+                                            cx.notify();
+                                        });
+                                        models::result_row(repository, Box::new(open), cx)
+                                    })
+                                    .collect::<Vec<_>>()
+                            }),
+                        )
+                        .track_scroll(&self.results_scroll)
+                        .size_full();
+                        listed(
+                            Scroller::listing("search-results-scroll", &self.results_scrollbar)
+                                .child(rows)
+                                .into_any_element(),
+                            cx,
+                        )
+                    }
+                };
+                let top = div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(div().flex().child(back("Models", cx)))
+                    .child(self.model_search.clone())
+                    .into_any_element();
+                (top, list)
             }
         };
         div()
+            .size_full()
             .flex()
             .flex_col()
-            .gap_4()
-            .size_full()
-            .child(field)
-            .child(list)
+            .items_center()
+            .pt(self.header_height)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .max_w(COLUMN)
+                    .px_6()
+                    .pb_6()
+                    .gap_4()
+                    .child(top)
+                    .child(list),
+            )
             .into_any_element()
     }
 
     /// Searches once typing pauses, so each keystroke does not reach the network.
-    fn query_changed(&mut self, cx: &mut Context<Self>) {
-        let query = self.search_input.read(cx).text().to_owned();
+    fn model_query_changed(&mut self, cx: &mut Context<Self>) {
+        let query = self.model_search.read(cx).text().to_owned();
         if query == self.searched {
             return;
         }
@@ -1261,155 +1618,224 @@ impl Settings {
         }));
     }
 
-    /// The sidebar: the app's mark, one entry per page, and what the engine runs on.
-    fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let mark = theme.metrics.control;
-        let current = self.page;
-        let device = self.status.read(cx).device.clone();
-        let entries = Page::ALL.into_iter().map(|page| {
-            let selected = page == current;
-            div()
-                .id(SharedString::from(format!("page-{}", page.title())))
+    /// The column of rows for the category shown, or for the search.
+    fn column(&mut self, config: &Config, cx: &mut Context<Self>) -> AnyElement {
+        let slots = self.slots(cx);
+        let body = match slots.is_empty() {
+            true => Vacancy::new("No settings match")
+                .icon("icons/search.svg")
+                .py_6()
+                .into_any_element(),
+            false => div()
                 .flex()
-                .items_center()
-                .gap_3()
-                .h(theme.metrics.control)
-                .px_3()
-                .rounded(theme.radius)
-                .squircle()
-                .cursor_pointer()
-                .text_color(match selected {
-                    true => theme.foreground,
-                    false => theme.muted_foreground,
-                })
-                .when(selected, |this| this.bg(theme.sidebar_accent))
-                .when(!selected, |this| {
-                    this.hover(|style| style.bg(theme.secondary.opacity(0.6)))
-                })
-                .on_click(cx.listener(move |this, _, window, cx| this.go(page, window, cx)))
-                .child(
-                    svg()
-                        .path(icons::path(page.icon()))
-                        .size(px(16.))
-                        .flex_none()
-                        .text_color(match selected {
-                            true => theme.foreground,
-                            false => theme.muted_foreground,
-                        }),
+                .flex_col()
+                .children(
+                    slots
+                        .into_iter()
+                        .map(|slot| self.slot_element(slot, config, cx)),
                 )
-                .child(page.title())
-        });
-        div()
-            .flex_none()
-            .w(SIDEBAR)
-            .h_full()
+                .into_any_element(),
+        };
+        Scroller::new("settings", &self.scrollbar)
             .flex()
             .flex_col()
-            .gap_1()
-            .p_3()
-            .bg(theme.sidebar)
-            .border_r_1()
-            .border_color(theme.sidebar_border)
+            .items_center()
+            // The rows dissolve over the header's height as they scroll up beneath it, so no
+            // sharp text sits over the blur. The tail reaches past the header so the handoff has
+            // no hard edge.
+            .fade_edges(self.header_height + HEADER_FADE_TAIL, px(0.))
             .child(
                 div()
                     .flex()
-                    .items_center()
-                    .gap_3()
-                    .px_2()
-                    .pt_2()
-                    .pb_4()
-                    .child(
-                        div()
-                            .flex_none()
-                            .size(mark)
-                            .rounded(mark / 2.)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .bg(theme.foreground)
-                            .child(
-                                svg()
-                                    .path(icons::path("icons/mic-vocal.svg"))
-                                    .size(mark * 0.5)
-                                    .text_color(theme.background),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child("Tokativ"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(theme.text(Text::Small))
-                                    .text_color(theme.muted_foreground)
-                                    .child(concat!("v", env!("CARGO_PKG_VERSION"))),
-                            ),
-                    ),
+                    .flex_col()
+                    .w_full()
+                    .max_w(COLUMN)
+                    .px_6()
+                    .pb_6()
+                    .pt(self.header_height)
+                    .child(body),
             )
-            .children(entries)
-            .child(div().flex_1())
-            .when_some(device, |this, device| {
-                this.child(
-                    div()
-                        .px_2()
-                        .text_size(theme.text(Text::Small))
-                        .text_color(theme.muted_foreground)
-                        .child(format!("Running on {}", device.name)),
-                )
+            .into_any_element()
+    }
+
+    /// The search field and the category bar, floated over the column with a blur under them.
+    fn header(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let searching = self.searching();
+        let chosen = self.page;
+        let view = cx.entity().downgrade();
+        // A search lights no category, since its rows come from all of them, and picking one
+        // ends the search.
+        let categories = TabBar::new("settings-categories")
+            .max_w_full()
+            .blurred()
+            .items(Page::ALL.map(|page| {
+                Button::new(SharedString::from(format!("page-{}", page.id())))
+                    .label(page.title())
+                    .icon(page.icon())
+                    .small()
+                    .ghost()
+                    .selected(!searching && page == chosen)
+                    .on_click(cx.listener(move |this, _, _, cx| this.select(page, cx)))
+            }));
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .flex()
+            .justify_center()
+            .px_6()
+            // The veil is absolute and takes the header's own size, so the last child, the
+            // column, is the one to measure.
+            .on_children_prepainted(move |bounds, _, cx| {
+                let Some(height) = bounds.last().map(|bounds| bounds.size.height) else {
+                    return;
+                };
+                view.update(cx, |view, cx| view.set_header_height(height, cx))
+                    .ok();
             })
-    }
-
-    /// Switches page and starts the new one at its top. The search page puts the cursor in its
-    /// field, since typing is the only thing to do there.
-    fn go(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
-        if self.page != page {
-            self.page = page;
-            self.scrollbar
-                .read(cx)
-                .scroll()
-                .set_offset(gpui::Point::default());
-            cx.notify();
-        }
-        if page == Page::Find {
-            let focus = self.search_input.focus_handle(cx);
-            focus.focus(window, cx);
-        }
-    }
-
-    /// The groups of the current page.
-    fn page(&self, config: &Config, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        match self.page {
-            Page::Model => vec![
-                self.models(config, cx).into_any_element(),
-                self.vocabulary(config, cx).into_any_element(),
-            ],
-            Page::Find => vec![self.find(cx)],
-            Page::Dictation => vec![
-                self.dictation(config, cx).into_any_element(),
-                self.detection(config, cx).into_any_element(),
-                self.insertion(config, cx).into_any_element(),
-            ],
-            Page::Style => vec![
-                self.profiles(config, cx).into_any_element(),
-                self.style(config, cx).into_any_element(),
-            ],
-            Page::General => vec![
-                self.appearance(config, cx).into_any_element(),
-                self.pill(config, cx).into_any_element(),
-                self.system(config, cx).into_any_element(),
-                self.resources(cx).into_any_element(),
-            ],
-        }
+            .child(veil(self.header_height, HEADER_BLUR, window))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .max_w(COLUMN)
+                    .gap_2()
+                    .pt_4()
+                    .pb_6()
+                    .child(self.search.clone())
+                    .child(div().flex().justify_center().child(categories)),
+            )
+            .into_any_element()
     }
 }
 
-/// A virtualized list on a group's raised surface, filling the space left on the page.
+/// A group label over the rows that follow it, in Sonora's eyebrow style.
+fn title(label: &str, cx: &App) -> AnyElement {
+    div()
+        .h(cx.theme().metrics.row)
+        .flex()
+        .flex_col()
+        .justify_end()
+        .pb_1()
+        .child(
+            div()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(eyebrow(label.to_owned(), cx)),
+        )
+        .into_any_element()
+}
+
+/// A title with its muted detail under it, filling the room left of a control.
+fn labels(title: SharedString, detail: Option<SharedString>, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w_0()
+        .gap_1()
+        .child(
+            div()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(title),
+        )
+        .when_some(detail, |this, detail| {
+            this.child(
+                div()
+                    .min_w_0()
+                    .text_color(theme.muted_foreground)
+                    .text_size(theme.text(Text::Small))
+                    .child(detail),
+            )
+        })
+}
+
+/// A settings row: the title and detail on the left, the control on the right.
+fn row(
+    title: SharedString,
+    detail: Option<SharedString>,
+    action: AnyElement,
+    cx: &App,
+) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_4()
+        .py_3()
+        .child(labels(title, detail, cx))
+        .child(div().flex_none().child(action))
+        .into_any_element()
+}
+
+/// A row that shades under the pointer. The shade reaches past the column by
+/// [`HOVER_REACH`], which the caller takes back with a negative margin, so the row's text
+/// stays in line with the rows around it.
+fn hovered(
+    id: impl Into<gpui::ElementId>,
+    content: impl IntoElement,
+    cx: &App,
+) -> gpui::Stateful<gpui::Div> {
+    let theme = cx.theme();
+    div()
+        .id(id)
+        .px(HOVER_REACH)
+        .py_2()
+        .rounded(theme.radius)
+        .squircle()
+        .cursor_pointer()
+        .hover(|style| style.bg(theme.secondary.opacity(0.6)))
+        .child(content)
+}
+
+/// One entry of a list row, with the cross that removes it.
+fn item(
+    id: SharedString,
+    content: impl IntoElement,
+    remove: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> AnyElement {
+    let theme = cx.theme();
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .py_0p5()
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(theme.text(Text::Small))
+                .text_color(theme.muted_foreground)
+                .child(content),
+        )
+        .child(
+            Button::new(id)
+                .icon("icons/x.svg")
+                .small()
+                .ghost()
+                .tint(theme.muted_foreground)
+                .on_click(remove),
+        )
+        .into_any_element()
+}
+
+/// A measured value shown where a control would go.
+fn reading(text: String, cx: &App) -> AnyElement {
+    div()
+        .text_size(cx.theme().text(Text::Small))
+        .text_color(cx.theme().muted_foreground)
+        .child(text)
+        .into_any_element()
+}
+
+/// A virtualized list on a raised surface, filling the space left on the page.
 fn listed(list: AnyElement, cx: &App) -> AnyElement {
     let theme = cx.theme();
     div()
@@ -1417,7 +1843,7 @@ fn listed(list: AnyElement, cx: &App) -> AnyElement {
         .flex_col()
         .flex_1()
         .min_h_0()
-        .p_1()
+        .p(chrome::LISTED_INSET)
         .rounded(chrome::GROUP_RADIUS)
         .squircle()
         .bg(theme.secondary.opacity(0.45))
@@ -1427,10 +1853,9 @@ fn listed(list: AnyElement, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// A muted line under the search field, standing in for a list that has nothing to show yet.
+/// A muted line standing in for a list that has nothing to show yet.
 fn hint(text: &str, cx: &App) -> AnyElement {
     div()
-        .px_1()
         .text_size(cx.theme().text(Text::Small))
         .text_color(cx.theme().muted_foreground)
         .child(text.to_owned())
@@ -1439,56 +1864,30 @@ fn hint(text: &str, cx: &App) -> AnyElement {
 
 impl Render for Settings {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
+        if let Some(setup) = self.setup.clone() {
+            return chrome::frame("Set up Tokativ", setup.into_any_element(), window, cx);
+        }
         let config = self.store.read(cx).config().clone();
-        let page = self.page;
-        let heading = div()
-            .flex_none()
-            .pt_6()
-            .pb_4()
-            .text_size(theme.text(Text::Title))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .child(page.title());
-        let groups = self.page(&config, cx);
-        // The search page lays out its own lists, which scroll themselves, so it fills the
-        // height instead of sitting in the page scroller.
-        let body = match page {
-            Page::Find => div()
-                .flex()
-                .flex_col()
-                .size_full()
-                .px_8()
-                .pb_6()
-                .child(heading)
-                .children(groups)
-                .into_any_element(),
-            _ => Scroller::new("settings", &self.scrollbar)
-                .child(
-                    div()
-                        .w_full()
-                        .px_8()
-                        .pb_8()
-                        .flex()
-                        .flex_col()
-                        .gap_4()
-                        .child(heading)
-                        .children(groups),
-                )
-                .into_any_element(),
+        let hidden = self.hidden(window, cx);
+        let backdrop: Hsla = cx.theme().background;
+        let page = match self.exploring && !self.searching() {
+            true => self.explorer(cx),
+            false => self.column(&config, cx),
         };
+        let header = self.header(window, cx);
         let content = div()
-            .flex()
+            .relative()
             .size_full()
-            .child(self.sidebar(cx))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .child(body),
-            )
+            .overflow_hidden()
+            // The padding, the fade and the scrollbar all hang off the header's measured
+            // height, so the column sits out the first frame rather than snapping into place.
+            .when(!self.header_measured, |this| this.invisible())
+            .child(veiled(div().absolute().inset_0().child(page), hidden))
+            // The scrim is the page's own colour, so fading it out fades the column in.
+            .when(hidden > 0., |this| {
+                this.child(div().absolute().inset_0().bg(backdrop).opacity(hidden))
+            })
+            .child(header)
             .into_any_element();
         chrome::frame("Settings", content, window, cx)
     }
