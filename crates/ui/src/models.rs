@@ -44,10 +44,9 @@ impl Described {
     }
 }
 
-/// The models to list before any search. With `offer` on, as in the setup, the recommended
-/// models come first with their recommendations, then everything else installed. With it off
-/// only installed models are listed, without recommendations. `also` adds models such as a
-/// download in progress.
+/// The models to list before any search. With `offer` on, as in the setup, only the recommended
+/// models are listed, with their recommendations. With it off the installed models are, without
+/// recommendations. `also` adds models either way, such as the one chosen.
 pub(crate) fn listed(library: &Library, also: &[ModelId], offer: bool) -> Vec<Described> {
     let mut ids: Vec<ModelId> = match offer {
         true => models::SUGGESTED
@@ -57,7 +56,11 @@ pub(crate) fn listed(library: &Library, also: &[ModelId], offer: bool) -> Vec<De
             .collect(),
         false => Vec::new(),
     };
-    let installed = library.installed_models().iter().map(|model| &model.id);
+    let installed = library
+        .installed_models()
+        .iter()
+        .map(|model| &model.id)
+        .filter(|_| !offer);
     for id in installed.chain(also) {
         if !ids.contains(id) {
             ids.push(id.clone());
