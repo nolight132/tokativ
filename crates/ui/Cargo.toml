@@ -22,7 +22,12 @@ tokativ-engine.workspace = true
 tokativ-updater.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+raw-window-handle.workspace = true
 rustix = { workspace = true, features = ["param"] }
+wayland-backend.workspace = true
+wayland-client.workspace = true
+wayland-protocols.workspace = true
+wayland-protocols-plasma.workspace = true
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 cpu-time.workspace = true

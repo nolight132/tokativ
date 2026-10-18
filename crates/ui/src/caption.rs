@@ -17,28 +17,29 @@ use crate::pill;
 use crate::spring::Spring;
 use crate::text_morph::{LINE_HEIGHT, Morph, TextViewport, align};
 
-/// The caption's width, wider than the pill so a phrase has room.
-const WIDTH: Pixels = px(520.);
+/// The range the caption's width can be set in. It is wider than the pill so a phrase has room.
+pub(crate) const MIN_WIDTH: f32 = 280.;
+pub(crate) const MAX_WIDTH: f32 = 900.;
 /// Three readable lines in a card larger than the controls. Older lines move up out of view.
-const TEXT_HEIGHT: Pixels = px(72.);
-const PADDING_X: Pixels = px(20.);
-const PADDING_Y: Pixels = px(14.);
-const BORDER: Pixels = px(1.);
+pub(crate) const TEXT_HEIGHT: Pixels = px(72.);
+pub(crate) const PADDING_X: Pixels = px(20.);
+pub(crate) const PADDING_Y: Pixels = px(14.);
+pub(crate) const BORDER: Pixels = px(1.);
 /// Room for word animations inside the original padding. Rows fade out completely
 /// before their letters reach the card's clip.
 const TEXT_BLEED: Pixels = px(10.);
-const RADIUS: Pixels = px(20.);
+pub(crate) const RADIUS: Pixels = px(20.);
 /// The space between the pill and the caption.
-const GAP: Pixels = px(10.);
+pub(crate) const GAP: Pixels = px(10.);
 const WORD_GAP: Pixels = px(5.);
 const WORD_STAGGER: Duration = Duration::from_millis(16);
 const MAX_STAGGER: Duration = Duration::from_millis(64);
 /// Keep about this many words, removing only complete rows that have already scrolled away.
 const MAX_WORDS: usize = 128;
 /// The caption itself unfolding towards the pill and folding back.
-const FOLDED_SCALE: f32 = 0.9;
-const FOLDED_SHIFT: Pixels = px(10.);
-const FOLDED_BLUR: Pixels = px(8.);
+pub(crate) const FOLDED_SCALE: f32 = 0.9;
+pub(crate) const FOLDED_SHIFT: Pixels = px(10.);
+pub(crate) const FOLDED_BLUR: Pixels = px(8.);
 const INK: SpringConfig = SpringConfig::new(160., 27., 1.);
 const REVEAL: SpringConfig = SpringConfig::new(300., 35., 1.);
 const NEW_WORD_BLUR: Pixels = px(6.);
@@ -47,8 +48,8 @@ const RESIZE: SpringConfig = SpringConfig::new(210., 30., 1.);
 /// Scroll the existing lines together, with no bounce past the last line.
 const SCROLL: SpringConfig = SpringConfig::new(520., 46., 1.);
 const REFLOW: SpringConfig = SpringConfig::new(520., 46., 1.);
-const OPEN: SpringConfig = SpringConfig::new(320., 22., 1.);
-const CLOSE: SpringConfig = SpringConfig::new(520., 44., 1.);
+pub(crate) const OPEN: SpringConfig = SpringConfig::new(320., 22., 1.);
+pub(crate) const CLOSE: SpringConfig = SpringConfig::new(520., 44., 1.);
 /// The longest a close may take before the window goes regardless.
 const CLOSE_LIMIT: Duration = Duration::from_millis(600);
 
@@ -83,18 +84,19 @@ pub struct Caption {
     beat: Option<Instant>,
 }
 
-/// Opens the caption beside a pill that sits `margin` from the `edge`, folded until the first
+/// Opens the caption beside the pill `config` places, as wide as it sets, folded until the first
 /// words arrive.
 pub fn open(
-    edge: PillEdge,
-    margin: f32,
+    config: &tokativ_config::Pill,
     display: Option<DisplayId>,
     cx: &mut gpui::App,
 ) -> anyhow::Result<WindowHandle<Caption>> {
+    let (edge, margin) = (config.edge, config.margin);
+    let wanted = px(config.caption_width.clamp(MIN_WIDTH, MAX_WIDTH));
     let width = display
         .and_then(|id| cx.find_display(id))
-        .map(|display| (display.visible_bounds().size.width - pill::SHADOW * 2.).min(WIDTH))
-        .unwrap_or(WIDTH);
+        .map(|display| (display.visible_bounds().size.width - pill::SHADOW * 2.).min(wanted))
+        .unwrap_or(wanted);
     let size = Size::new(
         width + pill::SHADOW * 2.,
         TEXT_HEIGHT + PADDING_Y * 2. + BORDER * 2. + pill::SHADOW * 2.,
@@ -310,19 +312,9 @@ impl Render for Caption {
         let (scroll, translation) = scroll_position(px(self.scroll.at()), window.scale_factor());
         self.scroll_handle.set_offset(point(px(0.), -scroll));
 
-        let bubble = div()
+        let bubble = bubble(1., cx)
             .w(px(self.width.at()).max(PADDING_X * 2. + BORDER * 2.))
             .h(px(self.height.at()).max(PADDING_Y * 2. + BORDER * 2.))
-            .flex_none()
-            .px(PADDING_X)
-            .py(PADDING_Y)
-            .rounded(RADIUS)
-            .squircle()
-            .bg(theme.background)
-            .border_1()
-            .border_color(theme.border)
-            .shadow_lg()
-            .overflow_hidden()
             .when(unfolding, |this| {
                 this.opacity((shown * 1.6).min(1.))
                     .layer_scale((FOLDED_SCALE + (1. - FOLDED_SCALE) * body).max(0.01))
@@ -379,6 +371,23 @@ impl Render for Caption {
             })
             .child(bubble)
     }
+}
+
+/// The caption's card without its size, for the text to go in, drawn at `scale`. The caption
+/// grows it to fit the words, and the settings show it with a sample.
+pub(crate) fn bubble(scale: f32, cx: &gpui::App) -> gpui::Div {
+    let theme = cx.theme();
+    div()
+        .flex_none()
+        .px(PADDING_X * scale)
+        .py(PADDING_Y * scale)
+        .rounded(RADIUS * scale)
+        .squircle()
+        .bg(theme.background)
+        .border_1()
+        .border_color(theme.border)
+        .shadow(pill::shadow(scale))
+        .overflow_hidden()
 }
 
 fn text_flow(caption: &Caption, content: Size<Pixels>, settled: Hsla, draft: Hsla) -> gpui::Div {

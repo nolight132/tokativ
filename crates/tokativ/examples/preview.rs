@@ -72,7 +72,7 @@ fn main() {
             cx,
         )
         .expect("opening the pill");
-        let caption = tokativ_ui::caption::open(config.edge, config.margin, None, cx)
+        let caption = tokativ_ui::caption::open(&config, None, cx)
             .expect("opening the caption");
 
         let started = Instant::now();

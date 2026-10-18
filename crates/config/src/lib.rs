@@ -245,6 +245,12 @@ pub struct Pill {
     pub cancel_button: bool,
     /// Show the check mark that finishes the session. Enter and the hotkey work either way.
     pub confirm_button: bool,
+    /// Logical pixels the pill is made wider than it needs, which it fills with more bars.
+    pub stretch: f32,
+    /// How the bars are laid out along the pill.
+    pub bars: Bars,
+    /// The widest the caption grows, in logical pixels. It never grows wider than the screen.
+    pub caption_width: f32,
 }
 
 impl Default for Pill {
@@ -255,6 +261,44 @@ impl Default for Pill {
             caption: !cfg!(target_os = "linux"),
             cancel_button: true,
             confirm_button: true,
+            stretch: 0.,
+            bars: Bars::Spectrum,
+            caption_width: 520.,
+        }
+    }
+}
+
+/// How the pill lays its bars out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Bars {
+    /// From low tones on the left to high ones on the right.
+    #[default]
+    Spectrum,
+    /// Low tones in the middle, mirrored out to high ones at both ends.
+    Mirrored,
+    /// The loudest bar in the middle and the rest falling away to both ends, whatever their
+    /// tone, so the bars always rise to a peak in the middle.
+    Peak,
+}
+
+impl Bars {
+    pub const ALL: [Self; 3] = [Self::Spectrum, Self::Mirrored, Self::Peak];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Spectrum => "Low to high",
+            Self::Mirrored => "Mirrored",
+            Self::Peak => "Peak in the middle",
+        }
+    }
+
+    /// The layout after this one, for cycling through them.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Spectrum => Self::Mirrored,
+            Self::Mirrored => Self::Peak,
+            Self::Peak => Self::Spectrum,
         }
     }
 }

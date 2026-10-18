@@ -4,24 +4,27 @@
 
 use gpui::Focusable as _;
 use gpui::prelude::*;
+use std::cell::Cell;
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, App, Context, Entity, Global, Hsla, Pixels, ScrollHandle, SharedString, Size, Task,
-    UniformListScrollHandle, Window, WindowHandle, div, px, svg, uniform_list,
+    Animation, AnimationExt as _, AnyElement, App, Context, Entity, Global, Hsla, Pixels,
+    ScrollHandle, SharedString, Size, Task, UniformListScrollHandle, Window, WindowHandle, div, px,
+    svg, uniform_list,
 };
-use tokativ_config::{Backend, Capitals, Config, Periods, PillEdge, Processor};
+use tokativ_config::{Backend, Bars, Capitals, Config, Periods, PillEdge, Processor};
 use tokativ_engine::{Hardware, ModelId};
 use ui::{
-    ActiveTheme as _, Button, Entrance, Input, Menu, MenuItem, Perch, Picker, Popovers, Radio,
-    Scrollbar, Scroller, Scrubber, ScrubberState, Separator, Switch, TabBar, Text, Tipped as _,
-    Vacancy, eyebrow, veiled,
+    ActiveTheme as _, Button, Entrance, Glide, Input, Menu, MenuItem, Perch, Picker, Popovers,
+    Radio, Scrollbar, Scroller, Scrubber, ScrubberState, Separator, Switch, TabBar, Text,
+    Tipped as _, Vacancy, eyebrow, veiled,
 };
 
 use crate::chrome::{self, veil};
 use crate::host::{Card, Files, Host, Library, ModelState, Status, Store};
 use crate::models;
 use crate::setup::Setup;
+use crate::studio::Studio;
 use crate::themes;
 use crate::usage::{Sampler, Usage};
 
@@ -34,6 +37,16 @@ const HEADER_BLUR: Pixels = px(1.);
 /// How far past the header the rows keep dissolving, so sharp rows never meet the haze at a
 /// hard edge.
 const HEADER_FADE_TAIL: Pixels = px(48.);
+/// How far the theme cards fade out towards a side of the row that has more cards past it.
+const THEMES_FADE: Pixels = px(48.);
+/// The height of a theme card's picture, without its name below.
+const THEME_CARD_HEIGHT: Pixels = px(76.);
+/// The room above and below the row of theme cards.
+const THEME_ROW_PADDING: Pixels = px(12.);
+/// The diameter of the buttons that move the theme cards along.
+const THEME_ARROW: Pixels = px(28.);
+/// How long those buttons take to fade in or out.
+const THEME_ARROW_FADE: std::time::Duration = std::time::Duration::from_millis(160);
 /// How far a clickable row's hover shade reaches past the column on either side.
 const HOVER_REACH: Pixels = px(10.);
 /// How much a query found in a setting's title counts over one found in its detail.
@@ -133,11 +146,18 @@ enum Page {
     Model,
     Dictation,
     Style,
+    Appearance,
     General,
 }
 
 impl Page {
-    const ALL: [Self; 4] = [Self::General, Self::Model, Self::Dictation, Self::Style];
+    const ALL: [Self; 5] = [
+        Self::General,
+        Self::Appearance,
+        Self::Model,
+        Self::Dictation,
+        Self::Style,
+    ];
 
     /// The name `TOKATIV_SETTINGS_PAGE` takes.
     fn id(self) -> &'static str {
@@ -145,6 +165,7 @@ impl Page {
             Self::Model => "model",
             Self::Dictation => "dictation",
             Self::Style => "style",
+            Self::Appearance => "appearance",
             Self::General => "general",
         }
     }
@@ -152,7 +173,8 @@ impl Page {
     fn from_id(id: &str) -> Option<Self> {
         match id {
             "typing" => Some(Self::Dictation),
-            "pill" | "system" => Some(Self::General),
+            "pill" => Some(Self::Appearance),
+            "system" => Some(Self::General),
             _ => Self::ALL.into_iter().find(|page| page.id() == id),
         }
     }
@@ -162,6 +184,7 @@ impl Page {
             Self::Model => "Model",
             Self::Dictation => "Dictation",
             Self::Style => "Writing style",
+            Self::Appearance => "Appearance",
             Self::General => "General",
         }
     }
@@ -171,6 +194,7 @@ impl Page {
             Self::Model => "icons/library-big.svg",
             Self::Dictation => "icons/mic-vocal.svg",
             Self::Style => "icons/pencil.svg",
+            Self::Appearance => "icons/palette.svg",
             Self::General => "icons/settings.svg",
         }
     }
@@ -204,11 +228,20 @@ enum Slot {
     SpokenEmoji,
     Laughter,
     Replacements,
+    /// Switches the appearance page between the live preview and the list of rows.
+    Editor,
+    /// The live preview of the pill and its caption, edited in place.
+    Studio,
+    /// The themes as cards, each showing the pill in its colors.
+    Themes,
     Theme,
     CustomThemes,
     Position,
     Distance,
+    Width,
+    Bars,
     Caption,
+    CaptionWidth,
     CancelButton,
     ConfirmButton,
     Login,
@@ -246,6 +279,8 @@ pub struct Settings {
     silence: Slider,
     threshold: Slider,
     margin: Slider,
+    stretch: Slider,
+    caption_width: Slider,
     devices: Vec<tokativ_audio::InputDevice>,
     scrollbar: Entity<Scrollbar>,
     device_scrollbar: Entity<Scrollbar>,
@@ -267,6 +302,9 @@ pub struct Settings {
     replace_to: Entity<Input>,
     term: Entity<Input>,
     profile_name: Entity<Input>,
+    studio: Entity<Studio>,
+    /// The appearance page shows the live preview rather than the list of rows.
+    visual: bool,
     /// The model query last sent, so a notify that did not change the text does not search
     /// again.
     searched: String,
@@ -289,6 +327,12 @@ pub struct Settings {
     results_scrollbar: Entity<Scrollbar>,
     /// Scrolls an opened repository's files and model card.
     files_scrollbar: Entity<Scrollbar>,
+    /// Scrolls the row of theme cards sideways.
+    themes_scroll: ScrollHandle,
+    /// Eases the theme cards to where a wheel step sends them.
+    themes_glide: Glide,
+    /// Whether the back and forward buttons over the theme cards have shown yet.
+    theme_arrows_seen: [Cell<bool>; 2],
     _debounce: Option<Task<()>>,
 }
 
@@ -348,6 +392,8 @@ impl Settings {
             silence: Slider::new("silence"),
             threshold: Slider::new("threshold"),
             margin: Slider::new("margin"),
+            stretch: Slider::new("stretch"),
+            caption_width: Slider::new("caption-width"),
             devices: tokativ_audio::input_devices(),
             scrollbar: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(view)),
             device_scrollbar: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(view)),
@@ -362,6 +408,8 @@ impl Settings {
             replace_to: cx.new(|cx| Input::new("Write as", cx).compact()),
             term: cx.new(|cx| Input::new("Add a name or term", cx).compact()),
             profile_name: cx.new(|cx| Input::new("Profile name", cx).compact()),
+            studio: cx.new(Studio::new),
+            visual: true,
             searched: String::new(),
             exploring: false,
             opened: None,
@@ -375,6 +423,13 @@ impl Settings {
             }),
             results_scroll,
             files_scrollbar: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(view)),
+            themes_scroll: ScrollHandle::new(),
+            themes_glide: {
+                let mut glide = Glide::default();
+                glide.watch(view);
+                glide
+            },
+            theme_arrows_seen: Default::default(),
             _debounce: None,
             _listing: {
                 let listing = cx.background_spawn(async { tokativ_engine::hardware() });
@@ -501,8 +556,9 @@ impl Settings {
         cx.notify();
     }
 
-    /// The slots of one category, group labels included.
-    fn page_slots(&self, page: Page, _cx: &App) -> Vec<Slot> {
+    /// The slots of one category, group labels included. The appearance page lists rows unless
+    /// `visual` asks for its live preview.
+    fn page_slots(&self, page: Page, visual: bool, _cx: &App) -> Vec<Slot> {
         match page {
             Page::Model => [Slot::Models, Slot::Explore, Slot::Runtime]
                 .into_iter()
@@ -531,34 +587,42 @@ impl Settings {
                 Slot::Laughter,
                 Slot::Replacements,
             ],
-            Page::General => [
-                Slot::Title("Appearance"),
+            Page::Appearance if visual => vec![
+                Slot::Editor,
+                Slot::Studio,
+                Slot::Title("Theme"),
+                Slot::Themes,
+                Slot::CustomThemes,
+            ],
+            Page::Appearance => vec![
+                Slot::Editor,
+                Slot::Title("Theme"),
                 Slot::Theme,
                 Slot::CustomThemes,
                 Slot::Title("Pill"),
                 Slot::Position,
                 Slot::Distance,
+                Slot::Width,
+                Slot::Bars,
                 Slot::Caption,
+                Slot::CaptionWidth,
                 Slot::CancelButton,
                 Slot::ConfirmButton,
-                Slot::Title("System"),
-                Slot::Login,
-                Slot::Tray,
-                Slot::Unload,
-            ]
-            .into_iter()
-            .chain(
-                [Slot::AutoUpdates, Slot::Updates]
-                    .into_iter()
-                    .filter(|_| cfg!(not(target_os = "linux"))),
-            )
-            .chain([
-                Slot::Title("Resources"),
-                Slot::Resources,
-                Slot::Title("About"),
-                Slot::Version,
-            ])
-            .collect(),
+            ],
+            Page::General => [Slot::Title("System"), Slot::Login, Slot::Tray, Slot::Unload]
+                .into_iter()
+                .chain(
+                    [Slot::AutoUpdates, Slot::Updates]
+                        .into_iter()
+                        .filter(|_| cfg!(not(target_os = "linux"))),
+                )
+                .chain([
+                    Slot::Title("Resources"),
+                    Slot::Resources,
+                    Slot::Title("About"),
+                    Slot::Version,
+                ])
+                .collect(),
         }
     }
 
@@ -569,7 +633,7 @@ impl Settings {
         let words: Vec<&str> = query.split_whitespace().collect();
         let mut hits: Vec<(u32, Slot)> = Page::ALL
             .into_iter()
-            .flat_map(|page| self.page_slots(page, cx))
+            .flat_map(|page| self.page_slots(page, false, cx))
             .filter_map(|slot| {
                 let (title, detail) = self.meta(slot, cx)?;
                 let title = title.to_lowercase();
@@ -593,7 +657,7 @@ impl Settings {
         };
         let plain = |title: &'static str, detail: &'static str| pair(title, Some(detail.into()));
         match slot {
-            Slot::Title(_) | Slot::ProfileTitle | Slot::Sep => None,
+            Slot::Title(_) | Slot::ProfileTitle | Slot::Sep | Slot::Studio | Slot::Themes => None,
             Slot::Models => plain(
                 "Models",
                 "The installed models. Clicking one makes it the one sessions dictate with.",
@@ -652,6 +716,10 @@ impl Settings {
                 "Replacements",
                 "Words to write differently every time they are heard.",
             ),
+            Slot::Editor => plain(
+                "Editor",
+                "Edit the pill on a live preview, or as a list of settings.",
+            ),
             Slot::Theme => plain(
                 "Theme",
                 "System follows the light or dark mode of the desktop.",
@@ -662,6 +730,15 @@ impl Settings {
             ),
             Slot::Position => plain("Pill position", "The edge of the screen the pill sits on."),
             Slot::Distance => plain("Distance from the edge", "The gap under or over the pill."),
+            Slot::Width => plain("Pill width", "A wider pill fits more bars."),
+            Slot::CaptionWidth => plain(
+                "Caption width",
+                "The widest the caption grows. It never grows wider than the screen.",
+            ),
+            Slot::Bars => plain(
+                "Bars",
+                "Low to high tones, mirrored from the middle, or the loudest in the middle.",
+            ),
             Slot::Caption => plain(
                 "Live caption",
                 "A floating text window below the top pill or above the bottom pill.",
@@ -701,10 +778,11 @@ impl Settings {
     }
 
     /// The column's slots, with a hairline between rows that are not under a fresh label. The
-    /// explore row reads as part of the model list above it, so no hairline touches it.
+    /// explore row reads as part of the model list above it, so no hairline touches it, and the
+    /// live preview reads as part of the editor switch above it.
     fn slots(&self, cx: &App) -> Vec<Slot> {
         let bare = match self.searching() {
-            false => self.page_slots(self.page, cx),
+            false => self.page_slots(self.page, self.visual, cx),
             true => self.found(cx),
         };
         let mut slots = Vec::with_capacity(bare.len() * 2);
@@ -713,8 +791,9 @@ impl Settings {
         for slot in bare {
             let titled = matches!(slot, Slot::Title(_) | Slot::ProfileTitle);
             let explore = slot == Slot::Explore || previous == Some(Slot::Explore);
+            let joined = explore || slot == Slot::Studio;
             previous = Some(slot);
-            if parted && !titled && !explore {
+            if parted && !titled && !joined {
                 slots.push(Slot::Sep);
             }
             parted = !titled;
@@ -846,6 +925,9 @@ impl Settings {
                 self.row(slot, switch, cx)
             }
             Slot::Replacements => self.replacements(config, cx),
+            Slot::Editor => self.editor(cx),
+            Slot::Studio => self.studio.clone().into_any_element(),
+            Slot::Themes => self.gallery(config, cx),
             Slot::Theme => self.theme(config, cx),
             Slot::CustomThemes => {
                 let folder = Button::new("open-themes")
@@ -878,11 +960,14 @@ impl Settings {
                 self.row(slot, picker, cx)
             }
             Slot::Distance => {
-                let margin = self
-                    .margin
-                    .dragging
-                    .unwrap_or_else(|| fraction(config.pill.margin, MARGIN));
-                let pixels = value(margin, MARGIN).round();
+                let dragging = self.margin.dragging;
+                let margin = dragging.unwrap_or_else(|| fraction(config.pill.margin, MARGIN));
+                // The live preview places the pill further out than the slider reaches.
+                let pixels = match dragging {
+                    Some(margin) => value(margin, MARGIN),
+                    None => config.pill.margin,
+                }
+                .round();
                 let slider = self.slider(
                     &self.margin,
                     margin,
@@ -892,6 +977,74 @@ impl Settings {
                     cx,
                 );
                 self.row(slot, slider, cx)
+            }
+            Slot::Width => {
+                let range = (0., crate::pill::MAX_STRETCH);
+                let stretch = self
+                    .stretch
+                    .dragging
+                    .unwrap_or_else(|| fraction(config.pill.stretch, range));
+                let pill = &config.pill;
+                let pixels = crate::pill::width(
+                    pill.cancel_button,
+                    pill.confirm_button,
+                    crate::pill::snap_stretch(value(stretch, range)),
+                )
+                .as_f32()
+                .round();
+                let slider = self.slider(
+                    &self.stretch,
+                    stretch,
+                    format!("{pixels} px"),
+                    |this| &mut this.stretch,
+                    |config, fraction| {
+                        config.pill.stretch = crate::pill::snap_stretch(value(
+                            fraction,
+                            (0., crate::pill::MAX_STRETCH),
+                        ))
+                    },
+                    cx,
+                );
+                self.row(slot, slider, cx)
+            }
+            Slot::CaptionWidth => {
+                let range = (crate::caption::MIN_WIDTH, crate::caption::MAX_WIDTH);
+                let wide = self
+                    .caption_width
+                    .dragging
+                    .unwrap_or_else(|| fraction(config.pill.caption_width, range));
+                let pixels = value(wide, range).round();
+                let slider = self.slider(
+                    &self.caption_width,
+                    wide,
+                    format!("{pixels} px"),
+                    |this| &mut this.caption_width,
+                    |config, fraction| {
+                        config.pill.caption_width = value(
+                            fraction,
+                            (crate::caption::MIN_WIDTH, crate::caption::MAX_WIDTH),
+                        )
+                        .round()
+                    },
+                    cx,
+                );
+                self.row(slot, slider, cx)
+            }
+            Slot::Bars => {
+                let layout = config.pill.bars;
+                let picker = Picker::new("bars", &self.popovers, layout.name())
+                    .width(Picker::REGULAR)
+                    .items(Bars::ALL.into_iter().map(|choice| {
+                        MenuItem::new(
+                            SharedString::from(format!("bars-{choice:?}")),
+                            choice.name(),
+                        )
+                        .selected(choice == layout)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.edit(cx, |config| config.pill.bars = choice);
+                        }))
+                    }));
+                self.row(slot, picker, cx)
             }
             Slot::Caption => self.switch(slot, "caption", config.pill.caption, cx, |config| {
                 &mut config.pill.caption
@@ -1059,6 +1212,201 @@ impl Settings {
         self.row(Slot::Method, picker, cx)
     }
 
+    /// The switch between the live preview and the list of rows.
+    fn editor(&self, cx: &mut Context<Self>) -> AnyElement {
+        let visual = self.visual;
+        let mode = |id: &'static str, label: &'static str, icon: &'static str, on: bool| {
+            Button::new(id)
+                .label(label)
+                .icon(icon)
+                .small()
+                .ghost()
+                .selected(visual == on)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if this.visual != on {
+                        this.visual = on;
+                        this.reveal(cx);
+                        cx.notify();
+                    }
+                }))
+        };
+        let modes = TabBar::new("appearance-editor").items([
+            mode("editor-visual", "Visual", "icons/palette.svg", true),
+            mode("editor-list", "List", "icons/list.svg", false),
+        ]);
+        self.row(Slot::Editor, modes, cx)
+    }
+
+    /// Every theme as a card that shows the pill in its colors, in one row that scrolls sideways
+    /// with a touchpad or Shift and the wheel. The system theme's card is split between its light
+    /// and dark looks.
+    fn gallery(&self, config: &Config, cx: &mut Context<Self>) -> AnyElement {
+        let theme = *cx.theme();
+        let cards = themes::swatches(cx).into_iter().map(|swatch| {
+            let chosen = swatch.id == config.theme;
+            let id = swatch.id.clone();
+            let halves = swatch.palettes.len();
+            // The card does not clip to its rounded corners, so each half rounds its own outer
+            // corners to match, inside the border.
+            let radius = theme.radius * 1.5;
+            let inner = crate::nested_radius(radius, px(2.));
+            let card = div()
+                .flex()
+                .h(THEME_CARD_HEIGHT)
+                .w_full()
+                .rounded(radius)
+                .squircle()
+                .border_2()
+                .border_color(match chosen {
+                    true => theme.foreground,
+                    false => theme.border.opacity(0.6),
+                })
+                .children(swatch.palettes.iter().enumerate().map(|(index, palette)| {
+                    let first = index == 0;
+                    let last = index + 1 == halves;
+                    div()
+                        .when(first, |this| this.rounded_l(inner))
+                        .when(last, |this| this.rounded_r(inner))
+                        .squircle()
+                        .flex_1()
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(palette.muted)
+                        .child(mini_pill(palette, halves > 1))
+                }));
+            div()
+                .id(SharedString::from(format!("theme-card-{}", swatch.id)))
+                .flex()
+                .flex_col()
+                .gap_1p5()
+                .flex_none()
+                .w(px(132.))
+                .cursor_pointer()
+                .hover(|style| style.opacity(0.85))
+                .child(card)
+                .child(
+                    div()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(theme.text(Text::Small))
+                        .text_color(match chosen {
+                            true => theme.foreground,
+                            false => theme.muted_foreground,
+                        })
+                        .child(swatch.name),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let id = id.clone();
+                    this.edit(cx, |config| config.theme = id);
+                }))
+        });
+        // The row reaches past the column by the width of its fade on either side, and pads its
+        // cards back in by as much, so at rest the fades lie over empty room and a card dims
+        // gradually as it scrolls into one. Before the row is first laid out its width is
+        // unknown, and the cards are taken to run past the right side.
+        let scroll = &self.themes_scroll;
+        self.themes_glide.sync(scroll);
+        let hidden = -scroll.offset().x;
+        let unmeasured = scroll.bounds().size.width <= Pixels::ZERO;
+        let before = hidden > px(0.5);
+        let after = unmeasured || scroll.max_offset().x - hidden > px(0.5);
+        let (glide, wheeled) = (self.themes_glide.clone(), scroll.clone());
+        let row = div()
+            .id("theme-cards")
+            .flex()
+            .gap_3()
+            .mx(-THEMES_FADE)
+            .px(THEMES_FADE)
+            .py(THEME_ROW_PADDING)
+            .overflow_x_scroll()
+            .restrict_scroll_to_axis()
+            .track_scroll(scroll)
+            // A touchpad already moves smoothly. A wheel jumps a whole step, which the glide
+            // eases out.
+            .on_scroll_wheel(move |event, window, _| match event.delta.precise() {
+                true => glide.jump(&wheeled, wheeled.offset()),
+                false => glide.nudge(&wheeled, window),
+            })
+            .fade_sides(THEMES_FADE, THEMES_FADE)
+            .children(cards);
+        div()
+            .relative()
+            .child(row)
+            .children(self.theme_arrow(false, before, cx))
+            .children(self.theme_arrow(true, after, cx))
+            .into_any_element()
+    }
+
+    /// The round button over one end of the theme cards that glides them most of a view
+    /// further, towards the end it sits on. It fades in while `wanted` and out once not, and
+    /// is left out until it is first wanted, so it does not fade out as the page opens.
+    fn theme_arrow(&self, forward: bool, wanted: bool, cx: &App) -> Option<AnyElement> {
+        let side = forward as usize;
+        let seen = self.theme_arrows_seen[side].get() || wanted;
+        self.theme_arrows_seen[side].set(seen);
+        if !seen {
+            return None;
+        }
+        let theme = cx.theme();
+        let (glide, scroll) = (self.themes_glide.clone(), self.themes_scroll.clone());
+        let (id, icon) = match forward {
+            true => ("theme-cards-forward", "icons/chevron-right.svg"),
+            false => ("theme-cards-back", "icons/chevron-left.svg"),
+        };
+        // Centered on the column's edge, over the inner half of the fade.
+        let inset = -THEME_ARROW / 2.;
+        let hover = theme.muted;
+        let button = div()
+            .id(id)
+            .absolute()
+            .top(THEME_ROW_PADDING + (THEME_CARD_HEIGHT - THEME_ARROW) / 2.)
+            .when(forward, |this| this.right(inset))
+            .when(!forward, |this| this.left(inset))
+            .size(THEME_ARROW)
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .bg(theme.secondary)
+            .border_1()
+            .border_color(theme.border)
+            .shadow_md()
+            .child(
+                svg()
+                    .path(icons::path(icon))
+                    .size(px(14.))
+                    .text_color(theme.foreground),
+            )
+            .when(wanted, |this| {
+                this.cursor_pointer()
+                    .occlude()
+                    .hover(move |style| style.bg(hover))
+                    .on_click(move |_, window, _| {
+                        let step = scroll.bounds().size.width * 0.75;
+                        let goal = glide.goal(&scroll);
+                        let x = match forward {
+                            true => goal.x - step,
+                            false => goal.x + step,
+                        };
+                        glide.aim(&scroll, gpui::point(x, goal.y), window);
+                    })
+            });
+        // A new id on each change starts the fade again.
+        let fade = SharedString::from(format!("{id}-{}", if wanted { "in" } else { "out" }));
+        let element = button.with_animation(
+            fade,
+            Animation::new(THEME_ARROW_FADE).with_easing(ui::ease_out_cubic),
+            move |button, delta| match wanted {
+                true => button.opacity(delta),
+                false => button.opacity(1. - delta),
+            },
+        );
+        Some(element.into_any_element())
+    }
+
     fn theme(&self, config: &Config, cx: &mut Context<Self>) -> AnyElement {
         let current = config.theme.clone();
         let known = themes::name(&current, cx);
@@ -1074,6 +1422,12 @@ impl Settings {
             .into_iter()
             .map(|kind| pick(kind.id().to_owned(), kind.label().to_string(), cx))
             .collect();
+        items.push(MenuItem::separator("themes-bundled"));
+        items.extend(
+            themes::bundled()
+                .iter()
+                .map(|theme| pick(theme.id.clone(), theme.name.clone(), cx)),
+        );
         let custom = themes::custom(cx).to_vec();
         if !custom.is_empty() {
             items.push(MenuItem::separator("themes-custom"));
@@ -2226,6 +2580,44 @@ impl Render for Settings {
             .into_any_element();
         chrome::frame("Tokativ", content, window, cx)
     }
+}
+
+/// The pill drawn small in a theme's colors, for its card. `narrow` fits it in half a card.
+fn mini_pill(palette: &ui::Theme, narrow: bool) -> impl IntoElement {
+    let height = match narrow {
+        true => 16.,
+        false => 22.,
+    };
+    let dot = height - 6.;
+    let reach = height - 8.;
+    let button = |fill: Hsla| div().flex_none().size(px(dot)).rounded_full().bg(fill);
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(height / 4.))
+        .h(px(height))
+        .px(px(2.))
+        .rounded_full()
+        .bg(palette.background)
+        .border_1()
+        .border_color(palette.border)
+        .shadow_sm()
+        .child(button(palette.secondary))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(2.))
+                .children([0.35, 0.7, 1., 0.6, 0.3].map(|level: f32| {
+                    div()
+                        .w(px(2.))
+                        .h(px((reach * level).max(2.)))
+                        .rounded_full()
+                        .bg(palette.foreground)
+                })),
+        )
+        .child(button(palette.foreground))
 }
 
 /// The menu a microphone picker opens: capped in height and scrolled with Sonora's scrollbar,

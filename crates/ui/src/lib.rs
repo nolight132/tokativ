@@ -6,6 +6,7 @@ mod chrome;
 // Off Linux there is no compositor to give binding directions for, so most of this goes unused.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod desktop;
+mod grab;
 mod host;
 mod hotkey;
 mod markdown;
@@ -13,9 +14,11 @@ mod models;
 mod overlay;
 pub mod pill;
 mod radius;
+mod screen;
 pub mod settings;
 pub mod setup;
 mod spring;
+mod studio;
 mod text_morph;
 pub mod themes;
 pub mod updates;

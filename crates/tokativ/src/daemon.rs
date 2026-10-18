@@ -915,7 +915,7 @@ impl Daemon {
                     .ok()
                     .flatten()
             });
-            self.caption = tokativ_ui::caption::open(pill.edge, pill.margin, display, cx)
+            self.caption = tokativ_ui::caption::open(pill, display, cx)
                 .map_err(|error| log::error!("caption: cannot open: {error:#}"))
                 .ok();
         }
