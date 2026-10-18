@@ -194,6 +194,9 @@ pub fn run(config: Config) -> Result<()> {
         }
         tokativ_ui::themes::init(&config.theme, cx);
         cx.bind_keys(bindings());
+        cx.on_action(|_: &tokativ_ui::settings::FocusSearch, cx| {
+            tokativ_ui::settings::focus_search(cx)
+        });
 
         let daemon = match Daemon::new(config, events, cx) {
             Ok(daemon) => daemon,
@@ -1242,11 +1245,15 @@ fn watch_config(changed: impl Fn(Event) + Send + 'static) -> Result<notify::Reco
     Ok(watcher)
 }
 
-/// The editing keys for the text fields in the setup and settings windows.
+/// The keys for the setup and settings windows: the editing keys for their text fields, and
+/// Ctrl+F or Cmd+F for the settings search.
 fn bindings() -> Vec<KeyBinding> {
+    use tokativ_ui::settings::FocusSearch;
     use ui::*;
     let editing = Some(INPUT_CONTEXT);
     vec![
+        KeyBinding::new("ctrl-f", FocusSearch, None),
+        KeyBinding::new("cmd-f", FocusSearch, None),
         KeyBinding::new("backspace", Backspace, editing),
         KeyBinding::new("ctrl-backspace", BackspaceWord, editing),
         KeyBinding::new("delete", Delete, editing),

@@ -54,6 +54,14 @@ const SEARCH_PAUSE: std::time::Duration = std::time::Duration::from_millis(350);
 /// model search.
 pub const PAGE_VARIABLE: &str = "TOKATIV_SETTINGS_PAGE";
 
+gpui::actions!(
+    settings,
+    [
+        /// Puts the cursor in the settings search, as Ctrl+F or Cmd+F does in Sonora.
+        FocusSearch
+    ]
+);
+
 struct Open(WindowHandle<Settings>);
 
 impl Global for Open {}
@@ -91,6 +99,21 @@ pub fn open(cx: &mut App) {
         Ok(handle) => cx.set_global(Open(handle)),
         Err(error) => log::error!("settings: cannot open the window: {error:#}"),
     }
+}
+
+/// Puts the cursor in the settings search when the settings window is in front and not showing
+/// the setup. The app handles [`FocusSearch`] here rather than in the window, since a key
+/// pressed with nothing focused never reaches the window's own elements.
+pub fn focus_search(cx: &mut App) {
+    let Some(handle) = cx.try_global::<Open>().map(|open| open.0) else {
+        return;
+    };
+    let _ = handle.update(cx, |settings, window, cx| {
+        if window.is_window_active() && settings.setup.is_none() {
+            let focus = settings.search.focus_handle(cx);
+            focus.focus(window, cx);
+        }
+    });
 }
 
 /// Opens the settings window on the models, for a session that found its model missing. A setup
