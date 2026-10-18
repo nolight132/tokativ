@@ -12,7 +12,7 @@ use gpui::{
     ScrollHandle, SharedString, Size, Task, UniformListScrollHandle, Window, WindowHandle, div, px,
     svg, uniform_list,
 };
-use tokativ_config::{Backend, Capitals, Config, Periods, PillEdge, Processor};
+use tokativ_config::{Backend, Bars, Capitals, Config, Periods, PillEdge, Processor};
 use tokativ_engine::{Hardware, ModelId};
 use ui::{
     ActiveTheme as _, Button, Entrance, Glide, Input, Menu, MenuItem, Perch, Picker, Popovers,
@@ -239,6 +239,7 @@ enum Slot {
     Position,
     Distance,
     Width,
+    Bars,
     Caption,
     CancelButton,
     ConfirmButton,
@@ -599,6 +600,7 @@ impl Settings {
                 Slot::Position,
                 Slot::Distance,
                 Slot::Width,
+                Slot::Bars,
                 Slot::Caption,
                 Slot::CancelButton,
                 Slot::ConfirmButton,
@@ -725,6 +727,10 @@ impl Settings {
             Slot::Position => plain("Pill position", "The edge of the screen the pill sits on."),
             Slot::Distance => plain("Distance from the edge", "The gap under or over the pill."),
             Slot::Width => plain("Pill width", "A wider pill fits more bars."),
+            Slot::Bars => plain(
+                "Bars",
+                "Low to high tones, mirrored from the middle, or the loudest in the middle.",
+            ),
             Slot::Caption => plain(
                 "Live caption",
                 "A floating text window below the top pill or above the bottom pill.",
@@ -974,7 +980,7 @@ impl Settings {
                 let pixels = crate::pill::width(
                     pill.cancel_button,
                     pill.confirm_button,
-                    value(stretch, range),
+                    crate::pill::snap_stretch(value(stretch, range)),
                 )
                 .as_f32()
                 .round();
@@ -984,12 +990,30 @@ impl Settings {
                     format!("{pixels} px"),
                     |this| &mut this.stretch,
                     |config, fraction| {
-                        config.pill.stretch =
-                            value(fraction, (0., crate::pill::MAX_STRETCH)).round()
+                        config.pill.stretch = crate::pill::snap_stretch(value(
+                            fraction,
+                            (0., crate::pill::MAX_STRETCH),
+                        ))
                     },
                     cx,
                 );
                 self.row(slot, slider, cx)
+            }
+            Slot::Bars => {
+                let layout = config.pill.bars;
+                let picker = Picker::new("bars", &self.popovers, layout.name())
+                    .width(Picker::REGULAR)
+                    .items(Bars::ALL.into_iter().map(|choice| {
+                        MenuItem::new(
+                            SharedString::from(format!("bars-{choice:?}")),
+                            choice.name(),
+                        )
+                        .selected(choice == layout)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.edit(cx, |config| config.pill.bars = choice);
+                        }))
+                    }));
+                self.row(slot, picker, cx)
             }
             Slot::Caption => self.switch(slot, "caption", config.pill.caption, cx, |config| {
                 &mut config.pill.caption

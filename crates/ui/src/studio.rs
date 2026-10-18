@@ -45,6 +45,11 @@ const FADE_OUT: f32 = 0.3;
 const FADE_IN: f32 = 0.7;
 /// The height of the badge that reads the distance on the monitor.
 const BADGE_HEIGHT: f32 = 18.;
+/// The most the compositor scales the group while it drops onto the monitor or lifts off it;
+/// past this it is laid out at another scale instead.
+const MAX_SHRINK: f32 = 0.8;
+/// How far each quarter of a stretched box reaches past its middle, so the quarters overlap.
+const SEAM: f32 = 2.;
 /// How wide the strip along each end of the pill is that drags it wider, half of it outside.
 const GRIP_WIDTH: f32 = 12.;
 /// The space between the pill and the outline that brings back a hidden button.
@@ -60,6 +65,8 @@ const DRAFT: &str = "Let's sync after the demo";
 /// The pill dropping onto the monitor, with a little bounce as it lands, and lifting back.
 const DROP: SpringConfig = SpringConfig::new(300., 24., 1.);
 const LIFT: SpringConfig = SpringConfig::new(360., 34., 1.);
+/// The pill's width gliding to the nearest whole pair of bars.
+const SNAP: SpringConfig = SpringConfig::new(520., 40., 1.);
 /// A button sliding between its outline beside the pill and its place in it, with a little
 /// give as it lands.
 const SLIDE: SpringConfig = SpringConfig::new(380., 28., 1.);
@@ -105,6 +112,8 @@ pub struct Studio {
     confirm: Spring,
     /// How far the caption has unfolded, from 0 hidden to 1 shown.
     caption: Spring,
+    /// How much wider than it needs the pill is drawn, gliding to whole pairs of bars.
+    stretch: Spring,
     /// How far the pill has dropped onto the monitor, from 0 at rest to 1 on it.
     place: Spring,
     /// The stage's width as last laid out.
@@ -133,6 +142,12 @@ impl Studio {
             started: Instant::now(),
             beat: None,
             caption: landed(caption::OPEN, config.caption),
+            stretch: {
+                let mut spring = Spring::new(SNAP);
+                spring.aim(pill::snap_stretch(config.stretch), SNAP);
+                spring.finish();
+                spring
+            },
             cancel: landed(SLIDE, config.cancel_button),
             confirm: landed(SLIDE, config.confirm_button),
             place: Spring::new(DROP),
@@ -223,7 +238,7 @@ impl Studio {
         let Some(resize) = self.resize.take() else {
             return;
         };
-        self.edit(cx, |pill| pill.stretch = resize.stretch.round());
+        self.edit(cx, |pill| pill.stretch = pill::snap_stretch(resize.stretch));
         cx.notify();
     }
 
@@ -248,6 +263,7 @@ impl Studio {
             &mut self.cancel,
             &mut self.confirm,
             &mut self.caption,
+            &mut self.stretch,
             &mut self.place,
         ];
         for spring in springs {
@@ -277,9 +293,13 @@ impl Render for Studio {
         if let Some(drag) = &self.drag {
             (config.edge, config.margin) = placement(drag.top, screen_height);
         }
-        if let Some(resize) = &self.resize {
-            config.stretch = resize.stretch;
-        }
+        // The width glides to whole pairs of bars, even while an end is dragged.
+        let stretch = match &self.resize {
+            Some(resize) => resize.stretch,
+            None => config.stretch,
+        };
+        self.stretch.aim(pill::snap_stretch(stretch), SNAP);
+        config.stretch = self.stretch.at().max(0.);
         let theme = *cx.theme();
         let stage_width = self.stage.get();
         let placing = self.place.at();
@@ -316,13 +336,16 @@ impl Render for Studio {
         // The monitor fills the stage's width, and the stage grows to fit it. On the monitor
         // everything shrinks to its scale.
         let aspect = screen.size.width.as_f32() / screen_height;
-        let monitor_height = ((stage_width - SCREEN_INSET * 2.) / aspect).clamp(1., SCREEN_HEIGHT);
-        let monitor_width = monitor_height * aspect;
+        // Its rectangle sits on whole pixels, so the frame lands there with nothing to snap.
+        let grid = |value: f32| ui::snapped(px(value), window).as_f32();
+        let monitor_height =
+            grid(((stage_width - SCREEN_INSET * 2.) / aspect).clamp(1., SCREEN_HEIGHT));
+        let monitor_width = grid(monitor_height * aspect);
         let placed_height = STAGE_HEIGHT.max(monitor_height + SCREEN_INSET * 2.);
         let stage_height = lerp(STAGE_HEIGHT, placed_height, placing);
         let monitor = point(
-            (stage_width - monitor_width) / 2.,
-            (placed_height - monitor_height) / 2.,
+            grid((stage_width - monitor_width) / 2.),
+            grid((placed_height - monitor_height) / 2.),
         );
         let scale = monitor_height / screen_height;
         let pill_top = top_of(config.edge, config.margin, screen_height);
@@ -331,30 +354,71 @@ impl Render for Studio {
             monitor.y + (pill_top + pill_height / 2. + to_group) * scale,
         );
 
+        // The group's corner rests on a whole pixel at both ends of the drop, so nothing is
+        // left over to snap away when it lands.
+        // Its box takes in the room it keeps for the shadows.
+        let shadow = pill::SHADOW.as_f32();
+        let on_grid = |center: f32, size: f32| {
+            let corner = center - size / 2.;
+            ui::snapped(px(corner), window).as_f32() - corner
+        };
+        let nudge = point(
+            lerp(
+                on_grid(rest.x, group_width + shadow * 2.),
+                on_grid(placed.x, (group_width + shadow * 2.) * scale),
+                placing,
+            ),
+            lerp(
+                on_grid(rest.y, group_height + shadow * 2.),
+                on_grid(placed.y, (group_height + shadow * 2.) * scale),
+                placing,
+            ),
+        );
         let center = point(
-            lerp(rest.x, placed.x, placing),
-            lerp(rest.y, placed.y, placing),
+            lerp(rest.x, placed.x, placing) + nudge.x,
+            lerp(rest.y, placed.y, placing) + nudge.y,
         );
         let group_scale = lerp(1., scale, placing).max(0.01);
-        let (group_width, group_height) = (group_width * group_scale, group_height * group_scale);
+        // Laid out at a step near its drawn scale, and shrunk the rest of the way as one layer.
+        // Compositor layers resample what they hold, so they are on only while the drop moves,
+        // and anything resting, on the stage or on the monitor, is drawn plainly.
+        let dropping = !self.place.settled();
+        let level = match dropping {
+            true => layout_scale(group_scale, scale, self.place.target == 1.),
+            false => group_scale,
+        };
+        let presented = group_scale / level;
+        let laid = (group_width * level, group_height * level);
 
         let frame_left = lerp(0., monitor.x, placing);
         let frame_top = lerp(0., monitor.y, placing);
+        let frame_width = lerp(grid(stage_width), monitor_width, placing);
         let frame_height = lerp(STAGE_HEIGHT, monitor_height, placing);
+        let shown = placing.clamp(0., 1.);
+        let frame_radius = px(lerp(chrome::GROUP_RADIUS.as_f32(), SCREEN_RADIUS, shown));
+        let moving_frame = dropping;
+        let (laid_left, drift_left) = adrift(frame_left, moving_frame, window);
+        let (laid_top, drift_top) = adrift(frame_top, moving_frame, window);
         let frame = div()
             .absolute()
-            .left(px(frame_left))
-            .top(px(frame_top))
-            .w(px(lerp(stage_width, monitor_width, placing)))
-            .h(px(frame_height))
-            .rounded(px(lerp(
-                chrome::GROUP_RADIUS.as_f32(),
-                SCREEN_RADIUS,
-                placing.clamp(0., 1.),
-            )))
-            .border_1()
-            .border_color(theme.border.opacity(placing.clamp(0., 1.)))
-            .bg(theme.background.opacity(placing.clamp(0., 1.)))
+            .left(laid_left)
+            .top(laid_top)
+            .when(moving_frame, |this| {
+                this.layer_translate(point(drift_left, drift_top))
+            })
+            .child(stretched(
+                frame_width,
+                frame_height,
+                moving_frame,
+                window,
+                || {
+                    div()
+                        .rounded(frame_radius)
+                        .border_1()
+                        .border_color(theme.border.opacity(shown))
+                        .bg(theme.background.opacity(shown))
+                },
+            ))
             .child(
                 div()
                     .absolute()
@@ -419,24 +483,30 @@ impl Render for Studio {
             .whitespace_nowrap()
             .child(format!("{} px", config.margin.round()));
 
-        let pill_row = self.pill_row(&config, group_scale, early, cx);
-        let caption = self.caption(
-            &config,
-            caption_width,
-            caption_height,
-            group_scale,
-            early,
-            cx,
-        );
+        // The capsule only needs drawing to the fraction while its own width glides. In the drop
+        // the whole group is scaled as one layer, laid out as it will land.
+        let moving = !self.cancel.settled() || !self.confirm.settled() || !self.stretch.settled();
+        let pill_row = self.pill_row(&config, level, early, moving, window, cx);
+        let caption = self.caption(&config, caption_width, caption_height, level, early, cx);
+        // The group's layer only carries what is painted inside it, so it reaches past the pill
+        // and the caption far enough to hold their shadows.
+        let margin = (pill::SHADOW * level).as_f32();
+        let (group_left, drift_x) = adrift(center.x - laid.0 / 2. - margin, dropping, window);
+        let (group_top, drift_y) = adrift(center.y - laid.1 / 2. - margin, dropping, window);
         let group = div()
             .absolute()
-            .left(px(center.x - group_width / 2.))
-            .top(px(center.y - group_height / 2.))
-            .w(px(group_width))
-            .h(px(group_height))
+            .p(px(margin))
+            .left(group_left)
+            .top(group_top)
+            .when(drift_x != px(0.) || drift_y != px(0.), |this| {
+                this.layer_translate(point(drift_x, drift_y))
+            })
+            .when(presented != 1., |this| this.layer_scale(presented))
+            .w(px(laid.0 + margin * 2.))
+            .h(px(laid.1 + margin * 2.))
             .flex()
             .items_center()
-            .gap(px(gap * group_scale))
+            .gap(px(gap * level))
             .map(|this| match bottom {
                 true => this.flex_col_reverse(),
                 false => this.flex_col(),
@@ -504,33 +574,78 @@ impl Studio {
         config: &PillConfig,
         scale: f32,
         resting: f32,
+        moving: bool,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = *cx.theme();
-        let width = px(self.capsule_width(config.stretch));
         let levels = speech(self.started.elapsed().as_secs_f32());
-        let button = pill::button_size() * scale;
-        // The capsule keeps room for each button as far as it has slid in, and the buttons are
-        // drawn over it, so one can slide from its outline beside the pill to its place in it
-        // while the capsule's edge grows out to meet it.
-        let room = |shown: f32| div().flex_none().w(button * shown.max(0.)).h_full();
-        let capsule = pill::capsule(width, scale, cx)
-            .child(room(self.cancel.at()))
-            .child(
-                pill::bars(levels, [1.; BANDS], theme.foreground, scale)
-                    .flex_none()
-                    .w((pill::bars_span() + px(config.stretch)) * scale)
-                    .h_full(),
-            )
-            .child(room(self.confirm.at()));
-        let cancel = self.button(Side::Cancel, config.cancel_button, scale, resting, cx);
-        let confirm = self.button(Side::Confirm, config.confirm_button, scale, resting, cx);
+        let height = pill::HEIGHT * scale;
+        // The row is laid out on whole pixels and the capsule drawn to the fraction over it, see
+        // [`stretched`]. Its shadow, soft enough that its steps never show, is cast by the row.
+        let exact = self.capsule_width(config.stretch) * scale;
+        let laid = ui::snapped(px(exact), window).as_f32();
+        let face = stretched(exact, height.as_f32(), moving, window, || {
+            pill::face(px(0.), height, cx)
+        });
+        let layout = config.bars;
+        let bars_width = (pill::bars_span() + px(config.stretch)) * scale;
+        let bars = pill::bars(levels, [1.; BANDS], theme.foreground, scale, layout)
+            .id("studio-bars")
+            .absolute()
+            .top_0()
+            .left((px(laid) - bars_width) / 2.)
+            .w(bars_width)
+            .h(height)
+            .when(resting == 1., |this| {
+                this.cursor_pointer()
+                    .tip_label(
+                        format!(
+                            "Bars: {}. Click for {}.",
+                            layout.name(),
+                            layout.next().name().to_lowercase()
+                        ),
+                        Perch::Above,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.edit(cx, |pill| pill.bars = layout.next())
+                    }))
+            });
+        let edges = (laid / 2. - exact / 2., laid / 2. + exact / 2.);
+        let cancel = self.button(
+            Side::Cancel,
+            config.cancel_button,
+            edges,
+            scale,
+            resting,
+            moving,
+            window,
+            cx,
+        );
+        let confirm = self.button(
+            Side::Confirm,
+            config.confirm_button,
+            edges,
+            scale,
+            resting,
+            moving,
+            window,
+            cx,
+        );
         div()
             .relative()
             .flex_none()
-            .w(width * scale)
-            .h(pill::HEIGHT * scale)
-            .child(capsule)
+            .w(px(laid))
+            .h(height)
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded(height / 2.)
+                    .shadow(pill::shadow(scale)),
+            )
+            .child(div().absolute().top_0().left_0().child(face))
+            .child(bars)
             .child(cancel)
             .child(confirm)
             .when(resting == 1., |this| {
@@ -605,12 +720,16 @@ impl Studio {
 
     /// One button, as far along as it has slid: its dashed outline beside the pill at 0 and
     /// the button itself in its place at 1, turning from one into the other on the way.
+    #[allow(clippy::too_many_arguments)]
     fn button(
         &self,
         side: Side,
         on: bool,
+        (left_edge, right_edge): (f32, f32),
         scale: f32,
         resting: f32,
+        moving: bool,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = *cx.theme();
@@ -622,7 +741,14 @@ impl Studio {
         let size = pill::button_size() * scale;
         let inside = (pill::HEIGHT - pill::button_size()) / 2. * scale;
         let outside = -(size + px(GHOST_GAP) * scale);
-        let offset = outside + (inside - outside) * shown;
+        // How far in from its end of the capsule the button sits, and so where it is in the row,
+        // to the fraction, laid out on a whole pixel with the rest added by the compositor.
+        let offset = (outside + (inside - outside) * shown).as_f32();
+        let left = match side {
+            Side::Cancel => left_edge + offset,
+            Side::Confirm => right_edge - offset - size.as_f32(),
+        };
+        let (left, rest) = adrift(left, moving, window);
         let (id, filled, name) = match side {
             Side::Cancel => (
                 "studio-cancel",
@@ -661,9 +787,9 @@ impl Studio {
             .absolute()
             .top(inside)
             .size(size)
-            .map(|this| match side {
-                Side::Cancel => this.left(offset),
-                Side::Confirm => this.right(offset),
+            .left(left)
+            .when(rest != px(0.), |this| {
+                this.layer_translate(point(rest, px(0.)))
             })
             // Off the stage the pointer sits still where the arrow was grabbed, and whatever
             // moves under it must not light up.
@@ -905,6 +1031,93 @@ enum Side {
     Confirm,
 }
 
+/// Splits `position` into the whole pixel layout puts it on and the fraction left over, which
+/// the compositor adds while `moving`, so a moving part glides rather than stepping from pixel
+/// to pixel. At rest the fraction is dropped and the part is drawn plainly.
+fn adrift(position: f32, moving: bool, window: &Window) -> (Pixels, Pixels) {
+    let laid = ui::snapped(px(position), window);
+    match moving {
+        true => (laid, px(position) - laid),
+        false => (laid, px(0.)),
+    }
+}
+
+/// A box `width` by `height` to the fraction, drawn by `face`. Layout puts every edge on a whole
+/// pixel, which would walk a growing box from pixel to pixel and stop it with a hop, so the box
+/// is laid out on whole pixels and drawn as four overlapping quarters, each pushed out to its
+/// corner by the compositor, which keeps the fraction. The quarters overlap where the face is
+/// flat, so no seam shows. At rest it is drawn plainly.
+fn stretched(
+    width: f32,
+    height: f32,
+    moving: bool,
+    window: &Window,
+    face: impl Fn() -> gpui::Div,
+) -> gpui::Div {
+    let laid = (
+        ui::snapped(px(width), window),
+        ui::snapped(px(height), window),
+    );
+    let rest = match moving {
+        true => ((px(width) - laid.0) / 2., (px(height) - laid.1) / 2.),
+        false => (px(0.), px(0.)),
+    };
+    let quarter = |right: bool, bottom: bool| {
+        let anchor = |this: gpui::Div| {
+            let this = match right {
+                true => this.right_0(),
+                false => this.left_0(),
+            };
+            match bottom {
+                true => this.bottom_0(),
+                false => this.top_0(),
+            }
+        };
+        let shift = point(
+            if right { rest.0 } else { -rest.0 },
+            if bottom { rest.1 } else { -rest.1 },
+        );
+        anchor(
+            div()
+                .absolute()
+                .w(laid.0 / 2. + px(SEAM))
+                .h(laid.1 / 2. + px(SEAM))
+                .overflow_hidden(),
+        )
+        .child(anchor(face().absolute().w(laid.0).h(laid.1)))
+        .when(shift != point(px(0.), px(0.)), |this| {
+            this.layer_translate(shift)
+        })
+    };
+    div()
+        .relative()
+        .w(laid.0)
+        .h(laid.1)
+        .child(quarter(false, false))
+        .child(quarter(true, false))
+        .child(quarter(false, true))
+        .child(quarter(true, true))
+}
+
+/// The scale the group is laid out at while it is drawn at `scale`, on its way between 1 and
+/// `end`: one of a few steps from 1 to `end`, the nearest on the side it is heading for. The
+/// compositor makes up the rest, never by much, so every edge moves smoothly, and the last
+/// stretch before it lands is already laid out as it will rest, so turning the layer off at the
+/// end changes nothing.
+fn layout_scale(scale: f32, end: f32, to_end: bool) -> f32 {
+    if end >= 1. {
+        return 1.;
+    }
+    let steps = (end.ln() / MAX_SHRINK.ln()).ceil().max(1.);
+    let step = end.powf(1. / steps);
+    let along = scale.max(f32::MIN_POSITIVE).ln() / step.ln();
+    let k = match to_end {
+        true => along.ceil(),
+        false => along.floor(),
+    };
+    step.powf(k.clamp(0., steps))
+}
+
 /// A spring already resting at `on`.
 fn landed(config: SpringConfig, on: bool) -> Spring {
     let mut spring = Spring::new(config);
@@ -963,6 +1176,26 @@ mod tests {
         ] {
             let top = top_of(edge, margin, 1080.);
             assert_eq!(placement(top, 1080.), (edge, margin));
+        }
+    }
+
+    #[test]
+    fn the_group_lands_laid_out_as_it_rests() {
+        let end = 0.27;
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        // Just short of either end, it is already laid out as it will rest there.
+        assert!(close(layout_scale(end * 1.01, end, true), end));
+        assert!(close(layout_scale(0.99, end, false), 1.));
+        assert!(close(layout_scale(1., end, true), 1.));
+        assert!(close(layout_scale(end, end, false), end));
+        for scale in [0.95, 0.8, 0.6, 0.41, 0.3] {
+            for to_end in [true, false] {
+                let ratio = scale / layout_scale(scale, end, to_end);
+                assert!(
+                    (MAX_SHRINK - 1e-4..=1. / MAX_SHRINK + 1e-4).contains(&ratio),
+                    "{scale} drawn at {ratio} of its layout"
+                );
+            }
         }
     }
 

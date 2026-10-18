@@ -11,7 +11,7 @@ use gpui::{
     canvas, div, point, px, svg,
 };
 use tokativ_audio::{BANDS, Levels};
-use tokativ_config::Pill as PillConfig;
+use tokativ_config::{Bars, Pill as PillConfig};
 use ui::ActiveTheme as _;
 
 use crate::overlay;
@@ -68,8 +68,15 @@ const CLOSE_LIMIT: Duration = Duration::from_millis(700);
 /// How small and how blurred the capsule is when folded.
 const FOLDED_SCALE: f32 = 0.82;
 const FOLDED_BLUR: Pixels = px(8.);
+/// How much wider each pair of bars beyond the bands makes the pill.
+pub(crate) const STRETCH_STEP: f32 = (BAR_WIDTH_PX + BAR_GAP_PX) * 2.;
 /// The most the pill can be made wider than it needs.
-pub(crate) const MAX_STRETCH: f32 = 240.;
+pub(crate) const MAX_STRETCH: f32 = STRETCH_STEP * 17.;
+
+/// `stretch` rounded to whole pairs of bars, so a pill at rest never shows a pair half in.
+pub(crate) fn snap_stretch(stretch: f32) -> f32 {
+    ((stretch / STRETCH_STEP).round() * STRETCH_STEP).clamp(0., MAX_STRETCH)
+}
 
 /// Wide enough for the buttons shown and the bars beside them, and `stretch` wider.
 pub(crate) fn width(cancel: bool, confirm: bool, stretch: f32) -> Pixels {
@@ -87,21 +94,25 @@ pub(crate) fn width(cancel: bool, confirm: bool, stretch: f32) -> Pixels {
 /// onto a drawing of the screen. Drawing it small rather than shrinking a full-size picture keeps
 /// its edges sharp.
 pub(crate) fn capsule(width: Pixels, scale: f32, cx: &App) -> gpui::Div {
-    let theme = cx.theme();
-    let height = HEIGHT * scale;
-    div()
-        .w(width * scale)
-        .h(height)
+    face(width * scale, HEIGHT * scale, cx)
         .flex()
         .items_center()
         .justify_between()
         .p((PADDING * scale - BORDER).max(Pixels::ZERO))
+        .shadow(shadow(scale))
+        .overflow_hidden()
+}
+
+/// The capsule's fill and outline alone, `width` by `height`, without its shadow or contents.
+pub(crate) fn face(width: Pixels, height: Pixels, cx: &App) -> gpui::Div {
+    let theme = cx.theme();
+    div()
+        .w(width)
+        .h(height)
         .rounded(height / 2.)
         .bg(theme.background)
         .border_1()
         .border_color(theme.border)
-        .shadow(shadow(scale))
-        .overflow_hidden()
 }
 
 /// Tailwind's large shadow, which the pill and the caption cast, at `scale`.
@@ -209,6 +220,7 @@ pub struct Pill {
     width: Pixels,
     cancel: bool,
     confirm: bool,
+    layout: Bars,
 }
 
 /// Opens the pill on the focused output where `config` places it, with the buttons it asks for.
@@ -221,8 +233,13 @@ pub fn open(
     resting: bool,
     cx: &mut App,
 ) -> anyhow::Result<WindowHandle<Pill>> {
-    let width = width(config.cancel_button, config.confirm_button, config.stretch);
+    let width = width(
+        config.cancel_button,
+        config.confirm_button,
+        snap_stretch(config.stretch),
+    );
     let (cancel, confirm) = (config.cancel_button, config.confirm_button);
+    let layout = config.bars;
     let size = Size::new(width + SHADOW * 2., HEIGHT + SHADOW * 2.);
     // The shadow margin is part of the surface, so the visible gap to the edge takes it off.
     let gap = px(config.margin) - SHADOW;
@@ -253,6 +270,7 @@ pub fn open(
             width,
             cancel,
             confirm,
+            layout,
         })
     })
 }
@@ -461,7 +479,11 @@ impl Render for Pill {
                             .on_click(move |_, _, cx| on_cancel(cx)),
                     )
                 })
-                .child(bars(shown, reveal, bar_color, 1.).flex_1().h_full())
+                .child(
+                    bars(shown, reveal, bar_color, 1., self.layout)
+                        .flex_1()
+                        .h_full(),
+                )
                 .when(self.confirm, |this| {
                     this.child(
                         confirm_button("confirm", 1., cx)
@@ -500,15 +522,31 @@ fn icon(path: &'static str, size: Pixels, color: Hsla) -> impl IntoElement {
     svg().path(icons::path(path)).size(size).text_color(color)
 }
 
-/// Paints the bars as rounded rectangles centered on the pill's midline, low frequencies on the
-/// left. `reveal` says how much of each bar shows while the pill opens and closes. A silent band
-/// draws a dot as tall as the bar is wide, so silence reads as a flat dotted line. Given more
-/// room than the bands need, more bars fill it, each following the bands on either side of it.
-/// They come in pairs, one at each end, so the bars already there keep their places, and the
-/// pair coming in fades and grows in as the room for it opens. `size` draws them smaller, for a pill drawn small. Every edge lands on a
-/// whole device pixel, so at fractional scales all bars come out the same width and the dots
-/// sit on one line.
-pub(crate) fn bars(levels: [f32; BARS], reveal: [f32; BARS], color: Hsla, size: f32) -> gpui::Div {
+/// Paints the bars as rounded rectangles centered on the pill's midline, laid out as `layout`
+/// says. `reveal` says how much of each bar shows while the pill opens and closes, from the
+/// middle out. A silent band draws a dot as tall as the bar is wide, so silence reads as a flat
+/// dotted line. Given more room than the bands need, more bars fill it, the bands spread across
+/// all of them. They come in pairs, one at each end, so the bars already there keep their
+/// places, and a pair still coming in fades and grows in as the room for it opens. A pill at
+/// rest is a whole number of pairs wide, see [`snap_stretch`]. `size` draws them smaller, for a
+/// pill drawn small. Every edge lands on a whole device pixel, so at fractional scales all bars
+/// come out the same width and the dots sit on one line.
+pub(crate) fn bars(
+    levels: [f32; BARS],
+    reveal: [f32; BARS],
+    color: Hsla,
+    size: f32,
+    layout: Bars,
+) -> gpui::Div {
+    // The peak reads the bands loudest first, folded out from the middle.
+    let levels = match layout {
+        Bars::Peak => {
+            let mut ranked = levels;
+            ranked.sort_by(|a, b| b.total_cmp(a));
+            ranked
+        }
+        Bars::Spectrum | Bars::Mirrored => levels,
+    };
     div().child(
         canvas(
             |_, _, _| {},
@@ -517,11 +555,12 @@ pub(crate) fn bars(levels: [f32; BARS], reveal: [f32; BARS], color: Hsla, size: 
                 let device = |logical: f32| (logical * scale).round();
                 let width = device(BAR_WIDTH_PX * size).max(1.);
                 let gap = device(BAR_GAP_PX * size).max(1.);
-                let room = device(bounds.size.width.as_f32()) - device(BAR_MARGIN_PX * size) * 2.;
-                // How many bars the room holds, fractions included, and so how many pairs beyond
-                // the bands and how far in the last pair has come.
-                let fits = ((room + gap) / (width + gap)).max(BARS as f32);
-                let pairs = (fits - BARS as f32) / 2.;
+                // How many bars the room holds, fractions included, counted in logical pixels
+                // so a pill a whole number of pairs wide holds exactly that many at any scale.
+                let room = bounds.size.width.as_f32() - BAR_MARGIN_PX * size * 2.;
+                let step = (BAR_WIDTH_PX + BAR_GAP_PX) * size;
+                let fits = ((room + BAR_GAP_PX * size) / step).max(BARS as f32);
+                let pairs = ((fits - BARS as f32) / 2. * 1000.).round() / 1000.;
                 let count = BARS + pairs.ceil() as usize * 2;
                 let incoming = match pairs.fract() {
                     0. => 1.,
@@ -532,21 +571,30 @@ pub(crate) fn bars(levels: [f32; BARS], reveal: [f32; BARS], color: Hsla, size: 
                     + ((device(bounds.size.width.as_f32()) - span) / 2.).round();
                 let middle = device(bounds.origin.y.as_f32() + bounds.size.height.as_f32() / 2.);
                 let reach = bounds.size.height.as_f32() * BAR_REACH * scale;
-                // The bands stretch over the room as it is, not just over whole bars, so they
-                // slide along smoothly as the pill widens.
+                // The bands spread over the room as it is rather than over whole bars, so at
+                // rest the outermost bars read the outermost bands, and while a pair comes in
+                // the bands slide outwards smoothly to make way for it.
                 let half = (fits - 1.) / 2.;
                 let middle_band = (BARS - 1) as f32 / 2.;
+                let last = (BARS - 1) as f32;
                 for index in 0..count {
                     let from_middle = index as f32 - (count - 1) as f32 / 2.;
-                    let band = (middle_band + from_middle / half * middle_band)
-                        .clamp(0., (BARS - 1) as f32);
+                    // Where the bar sits, as a band. The bars open from the middle by it, and
+                    // read their level from it, folded in half when mirrored or peaked.
+                    let place = (middle_band + from_middle / half * middle_band).clamp(0., last);
+                    let band = match layout {
+                        Bars::Spectrum => place,
+                        Bars::Mirrored | Bars::Peak => {
+                            ((place - middle_band).abs() / middle_band * last).min(last)
+                        }
+                    };
                     let outermost = index == 0 || index == count - 1;
                     let arriving = match outermost && count > BARS {
                         true => incoming,
                         false => 1.,
                     };
                     let level = between(&levels, band);
-                    let shown = between(&reveal, band) * arriving;
+                    let shown = between(&reveal, place) * arriving;
                     if shown <= 0. {
                         continue;
                     }
@@ -588,6 +636,14 @@ mod tests {
         assert_eq!(between(&levels, 0.), 0.);
         assert_eq!(between(&levels, 2.5), 2.5);
         assert_eq!(between(&levels, (BARS - 1) as f32), (BARS - 1) as f32);
+    }
+
+    #[test]
+    fn stretch_snaps_to_whole_pairs() {
+        assert_eq!(snap_stretch(0.), 0.);
+        assert_eq!(snap_stretch(STRETCH_STEP * 0.4), 0.);
+        assert_eq!(snap_stretch(STRETCH_STEP * 2.6), STRETCH_STEP * 3.);
+        assert_eq!(snap_stretch(10_000.), MAX_STRETCH);
     }
 
     #[test]
