@@ -45,7 +45,16 @@ services.tokativ.enable = true;
 ```
 
 Both install the released binary; `nix run github:nolight132/tokativ#tokativ-source` builds from
-source. Without Nix, download the binary from the
+source.
+
+On Arch Linux, install [`tokativ-bin`](https://aur.archlinux.org/packages/tokativ-bin) from the
+AUR:
+
+```sh
+yay -S tokativ-bin
+```
+
+Elsewhere, download the binary from the
 [latest release](https://github.com/nolight132/tokativ/releases/latest), make it executable and
 put it on your `PATH` as `tokativ`. It needs glibc 2.35+, the Vulkan loader, Wayland, libxkbcommon
 and alsa-lib.
