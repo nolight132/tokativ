@@ -24,9 +24,8 @@ focused app as you speak.
 > The project is vibe-coded as hell.
 
 Speech is recognized on your machine by [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp),
-on the graphics card through Vulkan, or Metal on macOS, or on the CPU. Nothing is downloaded until
-you pick a model: Parakeet is the recommended one, and settings can search Hugging Face for any
-other GGUF model.
+on the graphics card through Vulkan, or Metal on macOS, or on the CPU. Use any model available on Huggingface
+within Tokativ's settings.
 
 ## Install
 
