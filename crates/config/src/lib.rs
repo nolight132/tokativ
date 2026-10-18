@@ -356,6 +356,13 @@ impl Profile {
         }
     }
 
+    /// Whether this is one of the profiles Tokativ ships. Those keep their names.
+    pub fn is_built_in(&self) -> bool {
+        [Self::formal(), Self::casual()]
+            .iter()
+            .any(|built_in| built_in.name == self.name)
+    }
+
     /// Whether two profiles write text the same way, whatever they are called.
     fn writes_like(&self, other: &Self) -> bool {
         Self {
@@ -605,6 +612,17 @@ mod tests {
         let config = Config::parse(listed).unwrap();
         assert_eq!(config.profiles, vec![Profile::formal()]);
         assert_eq!(config.active_profile(), &Profile::formal());
+    }
+
+    #[test]
+    fn only_shipped_profiles_are_built_in() {
+        assert!(Profile::formal().is_built_in());
+        assert!(Profile::casual().is_built_in());
+        let renamed = Profile {
+            name: "Work".to_owned(),
+            ..Profile::formal()
+        };
+        assert!(!renamed.is_built_in());
     }
 
     #[test]

@@ -1353,9 +1353,10 @@ impl Settings {
     }
 
     /// Every profile with the one in use marked, and the field that names a new profile or
-    /// renames the one in use.
+    /// renames the one in use. A built-in profile in use offers no rename.
     fn profiles(&self, config: &Config, cx: &mut Context<Self>) -> AnyElement {
         let active = config.active_profile().name.clone();
+        let renamable = !config.active_profile().is_built_in();
         let removable = config.profiles.len() > 1;
         let items: Vec<AnyElement> = config
             .profiles
@@ -1423,7 +1424,9 @@ impl Settings {
                 .items_center()
                 .gap_2()
                 .child(div().flex_1().min_w_0().child(self.profile_name.clone()))
-                .child(div().flex_none().child(rename))
+                .when(renamable, |this| {
+                    this.child(div().flex_none().child(rename))
+                })
                 .child(div().flex_none().child(add)),
             None::<gpui::Div>,
             cx,
@@ -1431,17 +1434,14 @@ impl Settings {
     }
 
     /// Adds a copy of the profile in use under the name typed in the field and switches to it,
-    /// or with `copy` off renames the profile in use. A name already taken does nothing.
+    /// or with `copy` off renames the profile in use. A name already taken, or a rename of a
+    /// built-in profile, does nothing.
     fn name_profile(&mut self, copy: bool, cx: &mut Context<Self>) {
         let name = self.profile_name.read(cx).text().trim().to_owned();
-        let taken = self
-            .store
-            .read(cx)
-            .config()
-            .profiles
-            .iter()
-            .any(|profile| profile.name == name);
-        if name.is_empty() || taken {
+        let config = self.store.read(cx).config();
+        let taken = config.profiles.iter().any(|profile| profile.name == name);
+        let fixed = !copy && config.active_profile().is_built_in();
+        if name.is_empty() || taken || fixed {
             return;
         }
         self.edit(cx, |config| {

@@ -18,6 +18,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   else is chosen. Text, live drafts, and Escape and Enter during a session then work in Plasma
   apps as they do on niri.
 
+### Changed
+
+- The Formal and Casual profiles keep their names. Settings offers Rename only for profiles you
+  added.
+
 ### Fixed
 
 - The niri and Sway bindings from setup no longer start and finish dictation over and over
