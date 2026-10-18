@@ -255,6 +255,43 @@ impl Engine for Gguf {
     }
 }
 
+/// Somewhere a model can run, for the setup to offer before any model is loaded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hardware {
+    pub name: String,
+    /// A graphics card, whose own memory holds the weights.
+    pub gpu: bool,
+    /// The device's own memory for a graphics card, the computer's for the processor, in bytes.
+    /// Zero when the device does not say.
+    pub memory: u64,
+}
+
+/// The graphics cards Vulkan or Metal reaches, the one with the most memory first, then the
+/// processor.
+pub fn hardware() -> Vec<Hardware> {
+    let mut found: Vec<Hardware> = transcribe_cpp::devices()
+        .into_iter()
+        .filter_map(|device| {
+            let gpu = match device.device_type {
+                transcribe_cpp::DeviceType::Gpu | transcribe_cpp::DeviceType::Igpu => true,
+                transcribe_cpp::DeviceType::Cpu => false,
+                _ => return None,
+            };
+            let name = match device.description.is_empty() {
+                true => device.name,
+                false => readable(&device.description),
+            };
+            Some(Hardware {
+                name,
+                gpu,
+                memory: device.memory_total,
+            })
+        })
+        .collect();
+    found.sort_by_key(|hardware| (!hardware.gpu, std::cmp::Reverse(hardware.memory)));
+    found
+}
+
 /// A device's description as people name the hardware. Vulkan drivers append their own name and
 /// the chip's codename, as in "AMD Radeon RX 7900 XT (RADV NAVI31)", which says nothing more
 /// to most people and makes the name too long to sit in a line of text.
@@ -536,6 +573,14 @@ fn tail(text: &str, limit: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "lists this machine's devices"]
+    fn lists_hardware() {
+        for hardware in hardware() {
+            println!("{hardware:?}");
+        }
+    }
 
     #[test]
     fn device_names_lose_the_driver() {

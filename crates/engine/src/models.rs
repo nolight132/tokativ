@@ -90,47 +90,110 @@ impl ModelId {
     }
 }
 
-/// A model the app describes by name. The setup offers the ones with a recommendation.
+/// Whether the setup offers a model for a kind of device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Offer {
+    No,
+    Yes,
+    /// Offered first, and chosen until the user picks another.
+    Recommended,
+}
+
+/// A model the app describes by name. The setup offers some of them for a graphics card and
+/// some for the processor.
 pub struct Suggested {
     pub id: &'static str,
     pub name: &'static str,
     pub maker: &'static str,
+    /// What the model is good at, and so why one would pick it.
     pub summary: &'static str,
-    /// What the model suits best, shown beside its name in the setup, such as "Recommended for
-    /// CPU". Only models with one are offered before anyone searches.
-    pub recommended: Option<&'static str>,
+    pub gpu: Offer,
+    pub cpu: Offer,
+    /// The download's size, which is about the memory the weights take once loaded. Zero for
+    /// the models the setup does not offer.
+    pub bytes: u64,
+}
+
+impl Suggested {
+    pub fn offer(&self, gpu: bool) -> Offer {
+        match gpu {
+            true => self.gpu,
+            false => self.cpu,
+        }
+    }
 }
 
 pub const SUGGESTED: &[Suggested] = &[
     Suggested {
-        id: tokativ_config::DEFAULT_MODEL,
-        name: "Parakeet v3",
-        maker: "NVIDIA",
-        summary: "25 European languages with automatic language detection.",
-        recommended: Some("Recommended for CPU"),
+        id: "handy-computer/parakeet-ultra-gguf/parakeet-ultra-F16.gguf",
+        name: "Parakeet Ultra F16",
+        maker: "Moondream",
+        summary: "Parakeet v3 trained further, with fewer mistakes in each of its 25 European \
+                  languages. Full precision, which a graphics card runs as fast as a smaller copy.",
+        gpu: Offer::Recommended,
+        cpu: Offer::No,
+        bytes: 1_256_724_448,
     },
     Suggested {
-        id: "handy-computer/gigaam-v3-e2e-ctc-gguf/gigaam-v3-e2e-ctc-Q8_0.gguf",
-        name: "GigaAM v3",
-        maker: "Sber",
-        summary: "Automatic punctuation for Russian-language dictation.",
-        recommended: None,
+        id: "handy-computer/parakeet-ultra-gguf/parakeet-ultra-Q8_0.gguf",
+        name: "Parakeet Ultra Q8",
+        maker: "Moondream",
+        summary: "Parakeet v3 trained further, with fewer mistakes in each of its 25 European \
+                  languages. A compact copy, as accurate as the full one and quicker on a \
+                  processor.",
+        gpu: Offer::No,
+        cpu: Offer::Recommended,
+        bytes: 740_363_168,
     },
     Suggested {
         id: "handy-computer/whisper-large-v3-turbo-gguf/whisper-large-v3-turbo-Q8_0.gguf",
         name: "Whisper large v3 turbo",
         maker: "OpenAI",
-        summary: "Around 100 languages. Best suited to a graphics card.",
-        recommended: Some("Recommended for GPU"),
+        summary: "Around 100 languages, for one Parakeet does not know. Slower than Parakeet.",
+        gpu: Offer::Yes,
+        cpu: Offer::No,
+        bytes: 886_381_728,
+    },
+    Suggested {
+        id: "handy-computer/gigaam-v3-e2e-ctc-gguf/gigaam-v3-e2e-ctc-Q8_0.gguf",
+        name: "GigaAM v3",
+        maker: "Sber",
+        summary: "Russian only, with punctuation. Small and quick on any computer.",
+        gpu: Offer::Yes,
+        cpu: Offer::Yes,
+        bytes: 272_151_136,
+    },
+    Suggested {
+        id: tokativ_config::DEFAULT_MODEL,
+        name: "Parakeet v3",
+        maker: "NVIDIA",
+        summary: "25 European languages with automatic language detection.",
+        gpu: Offer::No,
+        cpu: Offer::No,
+        bytes: 0,
     },
     Suggested {
         id: "handy-computer/canary-1b-v2-gguf/canary-1b-v2-Q8_0.gguf",
         name: "Canary 1B v2",
         maker: "NVIDIA",
         summary: "25 European languages with automatic punctuation.",
-        recommended: None,
+        gpu: Offer::No,
+        cpu: Offer::No,
+        bytes: 0,
     },
 ];
+
+/// The models the setup offers for a graphics card or the processor, the recommended one
+/// first.
+pub fn offered(gpu: bool) -> impl Iterator<Item = &'static Suggested> {
+    let recommended = SUGGESTED
+        .iter()
+        .filter(move |suggested| suggested.offer(gpu) == Offer::Recommended);
+    let others = SUGGESTED
+        .iter()
+        .filter(move |suggested| suggested.offer(gpu) == Offer::Yes);
+    recommended.chain(others)
+}
 
 /// The suggested entry for a model, if it is one.
 pub fn suggested(id: &ModelId) -> Option<&'static Suggested> {
@@ -471,6 +534,31 @@ mod tests {
                 .name(),
             "Parakeet v3"
         );
+    }
+
+    #[test]
+    fn each_device_gets_parakeet_ultra_first() {
+        let first = |gpu| offered(gpu).next().map(|suggested| suggested.id);
+        assert_eq!(
+            first(true),
+            Some("handy-computer/parakeet-ultra-gguf/parakeet-ultra-F16.gguf")
+        );
+        assert_eq!(
+            first(false),
+            Some("handy-computer/parakeet-ultra-gguf/parakeet-ultra-Q8_0.gguf")
+        );
+        for gpu in [true, false] {
+            assert_eq!(
+                offered(gpu)
+                    .filter(|suggested| suggested.offer(gpu) == Offer::Recommended)
+                    .count(),
+                1
+            );
+            for suggested in offered(gpu) {
+                assert!(ModelId::parse(suggested.id).is_some(), "{}", suggested.id);
+                assert!(suggested.bytes > 0, "{}", suggested.id);
+            }
+        }
     }
 
     #[test]

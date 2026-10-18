@@ -1,5 +1,5 @@
-//! The first run: download models, pick a microphone, try a dictation, and copy the niri
-//! keybind. The settings window shows it in place of the settings until it is finished, so
+//! The first run: pick what runs the model, download one suited to it, pick a microphone, try a
+//! dictation, and copy the keybind. The settings window shows it in place of the settings until it is finished, so
 //! nothing else can be reached before a model is in place.
 
 use gpui::Focusable as _;
@@ -11,7 +11,8 @@ use gpui::{
 use std::time::Instant;
 
 use tokativ_audio::{InputDevice, Levels, Recorder};
-use tokativ_engine::ModelId;
+use tokativ_config::Processor;
+use tokativ_engine::{Hardware, ModelId};
 use ui::{
     ActiveTheme as _, Button, Input, MenuItem, Picker, Popovers, Radio, Scrollbar, Scroller, Text,
 };
@@ -34,9 +35,13 @@ const METER_FLOOR: f32 = -60.;
 const BINDING_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 const METER_ATTACK: f32 = 0.03;
 const METER_RELEASE: f32 = 0.3;
+/// The least video memory a graphics card needs for the setup to recommend it: Parakeet Ultra at
+/// full precision with room to work.
+const GPU_MEMORY: u64 = 3 << 30;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Step {
+    Device,
     Models,
     Microphone,
     Try,
@@ -44,11 +49,18 @@ enum Step {
 }
 
 impl Step {
-    const ALL: [Self; 4] = [Self::Models, Self::Microphone, Self::Try, Self::Hotkey];
+    const ALL: [Self; 5] = [
+        Self::Device,
+        Self::Models,
+        Self::Microphone,
+        Self::Try,
+        Self::Hotkey,
+    ];
 
     /// The name the sandbox's `--step` flag takes.
     fn id(self) -> &'static str {
         match self {
+            Self::Device => "device",
             Self::Models => "models",
             Self::Microphone => "microphone",
             Self::Try => "try",
@@ -58,6 +70,7 @@ impl Step {
 
     fn title(self) -> &'static str {
         match self {
+            Self::Device => "Device",
             Self::Models => "Models",
             Self::Microphone => "Microphone",
             Self::Try => "Try it",
@@ -67,6 +80,7 @@ impl Step {
 
     fn icon(self) -> &'static str {
         match self {
+            Self::Device => "icons/settings.svg",
             Self::Models => "icons/library-big.svg",
             Self::Microphone => "icons/mic-vocal.svg",
             Self::Try => "icons/text-select.svg",
@@ -77,6 +91,7 @@ impl Step {
     /// One line on what the step asks for.
     fn summary(self) -> &'static str {
         match self {
+            Self::Device => "Choose what runs the speech model",
             Self::Models => "Choose the speech model to dictate with",
             Self::Microphone => "Choose what to listen to and check the level",
             Self::Try => "Dictate a sentence into the field below",
@@ -94,6 +109,9 @@ pub struct Setup {
     library: Entity<Library>,
     status: Entity<Status>,
     step: Step,
+    /// The graphics cards and the processor, once they are listed. Listing starts the graphics
+    /// driver, so it happens in the background.
+    hardware: Option<Vec<Hardware>>,
     popovers: Popovers,
     devices: Vec<InputDevice>,
     /// Feeds the level meter while the microphone step is shown.
@@ -128,7 +146,7 @@ impl Setup {
         let first = std::env::var(STEP_VARIABLE)
             .ok()
             .and_then(|id| Step::ALL.into_iter().find(|step| step.id() == id))
-            .unwrap_or(Step::Models);
+            .unwrap_or(Step::Device);
         setup.go(first, window, cx);
         setup
     }
@@ -151,11 +169,26 @@ impl Setup {
         .detach();
         let field = cx.new(|cx| Input::new("Your words appear here", cx));
         let view = cx.entity_id();
+        let listing = cx.background_spawn(async { tokativ_engine::hardware() });
+        cx.spawn(async move |this, cx| {
+            let hardware = listing.await;
+            this.update(cx, |this, cx| {
+                this.hardware = Some(hardware);
+                // The setup may have opened on the model step before the devices were known.
+                if this.step == Step::Models {
+                    this.settle_device(cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
         Self {
             store: host.store,
             library: host.library,
             status: host.status,
-            step: Step::Models,
+            step: Step::Device,
+            hardware: None,
             popovers: Popovers::default(),
             devices: tokativ_audio::input_devices(),
             monitor: None,
@@ -184,6 +217,7 @@ impl Setup {
         self.monitor = None;
         self._watching = None;
         match step {
+            Step::Models => self.settle_device(cx),
             Step::Hotkey => self.watch_binding(cx),
             Step::Microphone => self.listen(cx),
             Step::Try => {
@@ -276,16 +310,155 @@ impl Setup {
         self.meter_shown
     }
 
+    /// The best graphics card, and the processor.
+    fn devices(&self) -> (Option<&Hardware>, Option<&Hardware>) {
+        let hardware = self.hardware.as_deref().unwrap_or_default();
+        (
+            hardware.iter().find(|hardware| hardware.gpu),
+            hardware.iter().find(|hardware| !hardware.gpu),
+        )
+    }
+
+    /// The graphics card when there is one with room for the recommended model, the processor
+    /// otherwise.
+    fn recommended(&self) -> Processor {
+        match self.devices().0 {
+            Some(gpu) if gpu.memory == 0 || gpu.memory >= GPU_MEMORY => Processor::Gpu,
+            _ => Processor::Cpu,
+        }
+    }
+
+    /// What runs the model: the choice in the config, or the recommendation while it is left
+    /// automatic or names a graphics card there is none of.
+    fn processor(&self, cx: &App) -> Processor {
+        match self.store.read(cx).config().processor {
+            Processor::Gpu if self.devices().0.is_some() => Processor::Gpu,
+            Processor::Cpu => Processor::Cpu,
+            _ => self.recommended(),
+        }
+    }
+
+    /// Writes the device down as chosen, and picks the model recommended for it unless one that
+    /// is installed is chosen already.
+    fn settle_device(&mut self, cx: &mut Context<Self>) {
+        if self.hardware.is_none() {
+            return;
+        }
+        let processor = self.processor(cx);
+        let config = self.store.read(cx).config();
+        let installed =
+            ModelId::parse(&config.model).is_some_and(|id| self.library.read(cx).installed(&id));
+        let model = tokativ_engine::models::offered(processor == Processor::Gpu)
+            .next()
+            .map(|suggested| suggested.id.to_owned())
+            .filter(|_| !installed);
+        if config.processor == processor && model.is_none() {
+            return;
+        }
+        self.store.update(cx, |store, cx| {
+            store.update(
+                |config| {
+                    config.processor = processor;
+                    if let Some(model) = model {
+                        config.model = model;
+                    }
+                },
+                cx,
+            )
+        });
+    }
+
+    fn device(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let column = div().flex().flex_col().gap_2().child(intro(
+            "Speech is recognized on this computer, and nothing you say leaves it.",
+            cx,
+        ));
+        if self.hardware.is_none() {
+            return column.child(intro("Looking for a graphics card…", cx));
+        }
+        let (gpu, cpu) = self.devices();
+        let chosen = self.processor(cx);
+        let recommended = self.recommended();
+        let option = |processor: Processor,
+                      title: &'static str,
+                      hardware: Option<&Hardware>,
+                      memory: &'static str,
+                      why: &'static str,
+                      cx: &mut Context<Self>| {
+            let facts = hardware.map(|hardware| match hardware.memory {
+                0 => hardware.name.clone(),
+                bytes => format!("{} · {} {memory}", hardware.name, chrome::memory(bytes)),
+            });
+            choice(
+                SharedString::from(format!("device-{processor:?}")),
+                chosen == processor,
+                title,
+                recommended == processor,
+                facts,
+                why,
+                cx.listener(move |this, _, _, cx| {
+                    this.store.update(cx, |store, cx| {
+                        store.update(|config| config.processor = processor, cx)
+                    });
+                }),
+                cx,
+            )
+        };
+        let column = match gpu {
+            Some(gpu) => column.child(option(
+                Processor::Gpu,
+                "Graphics card",
+                Some(gpu),
+                "video memory",
+                "The fastest. A phrase is written almost as soon as you stop, and the processor \
+                 stays free for everything else.",
+                cx,
+            )),
+            None => column.child(intro(
+                "No graphics card that models can run on was found, so they run on the processor.",
+                cx,
+            )),
+        };
+        column.child(option(
+            Processor::Cpu,
+            "Processor",
+            cpu,
+            "memory",
+            "Works on any computer. Each phrase takes a moment longer, so the models offered \
+             for it are compact copies.",
+            cx,
+        ))
+    }
+
     fn models(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.hardware.is_none() {
+            return div().child(intro("Looking for a graphics card…", cx));
+        }
         let chosen = ModelId::parse(&self.store.read(cx).config().model);
-        let listed = models::listed(self.library.read(cx), chosen.as_slice(), true);
+        let gpu = self.processor(cx) == Processor::Gpu;
+        let (card, processor) = self.devices();
+        let memory = match gpu {
+            true => card,
+            false => processor,
+        }
+        .map_or(0, |hardware| hardware.memory);
+        let listed = models::offered(gpu, memory, chosen.as_slice());
 
         div()
             .flex()
             .flex_col()
             .gap_2()
             .child(intro(
-                "It runs on this computer, and nothing you say leaves it.",
+                match gpu {
+                    true => {
+                        "These suit the graphics card. Parakeet Ultra fits most people, the \
+                             others are for languages it does not know."
+                    }
+                    false => {
+                        "These suit the processor. Parakeet Ultra fits most people, \
+                              GigaAM is lighter for Russian alone."
+                    }
+                },
                 cx,
             ))
             .children(listed.into_iter().map(|model| {
@@ -523,6 +696,7 @@ impl Setup {
 
     fn can_advance(&self, cx: &App) -> bool {
         match self.step {
+            Step::Device => self.hardware.is_some(),
             Step::Models => ModelId::parse(&self.store.read(cx).config().model)
                 .is_some_and(|id| self.library.read(cx).installed(&id)),
             _ => true,
@@ -543,6 +717,80 @@ fn intro(text: impl Into<SharedString>, cx: &App) -> impl IntoElement {
         .text_color(cx.theme().muted_foreground)
         .text_size(cx.theme().text(Text::Small))
         .child(text.into())
+}
+
+/// One option of a step, in a frame that brightens when it is picked: a radio, the title and a
+/// recommendation tag, what the hardware is, and why one would pick it.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each part of the option is its own argument"
+)]
+fn choice(
+    id: SharedString,
+    picked: bool,
+    title: &'static str,
+    recommended: bool,
+    facts: Option<String>,
+    why: &'static str,
+    pick: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> gpui::AnyElement {
+    let theme = cx.theme();
+    let small = theme.text(Text::Small);
+    div()
+        .id(id.clone())
+        .flex()
+        .items_start()
+        .gap_3()
+        .px(chrome::GROUP_PADDING)
+        .py_3()
+        .rounded(chrome::GROUP_RADIUS)
+        .squircle()
+        .border_1()
+        .border_color(match picked {
+            true => theme.foreground.opacity(0.5),
+            false => theme.border.opacity(0.6),
+        })
+        .cursor_pointer()
+        .hover(|style| style.bg(theme.secondary.opacity(0.6)))
+        .on_click(pick)
+        .child(div().flex_none().pt(px(2.)).child(Radio::new(
+            SharedString::from(format!("{id}-radio")),
+            picked,
+        )))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .gap_1()
+                .child(
+                    div()
+                        .flex()
+                        .items_baseline()
+                        .gap_2()
+                        .child(title)
+                        .when(recommended, |this| {
+                            this.child(models::tag("Recommended", cx))
+                        }),
+                )
+                .when_some(facts, |this, facts| {
+                    this.child(
+                        div()
+                            .text_size(small)
+                            .text_color(theme.foreground.opacity(0.85))
+                            .child(facts),
+                    )
+                })
+                .child(
+                    div()
+                        .text_size(small)
+                        .text_color(theme.muted_foreground)
+                        .child(why),
+                ),
+        )
+        .into_any_element()
 }
 
 /// A line in a rounded frame saying where the hotkey check stands. The frame and icon brighten
@@ -660,6 +908,7 @@ impl Render for Setup {
         let last = index == Step::ALL.len() - 1;
 
         let body = match step {
+            Step::Device => self.device(cx).into_any_element(),
             Step::Models => self.models(cx).into_any_element(),
             Step::Microphone => self.microphone(window, cx).into_any_element(),
             Step::Try => self.try_it(window, cx).into_any_element(),

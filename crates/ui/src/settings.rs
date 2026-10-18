@@ -1077,7 +1077,7 @@ impl Settings {
     /// The models to choose from. Clicking an installed model makes it the one sessions use.
     fn models(&self, config: &Config, cx: &mut Context<Self>) -> AnyElement {
         let chosen = ModelId::parse(&config.model);
-        let listed = models::listed(self.library.read(cx), &[], false);
+        let listed = models::listed(self.library.read(cx), &[]);
         let rows = listed.into_iter().map(|model| {
             let id = model.id.clone();
             let radio = Radio::new(
