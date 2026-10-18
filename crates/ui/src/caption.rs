@@ -17,9 +17,10 @@ use crate::pill;
 use crate::spring::Spring;
 use crate::text_morph::{LINE_HEIGHT, Morph, TextViewport, align};
 
-/// The range the caption's width can be set in. It is wider than the pill so a phrase has room.
+/// The range the caption's width can be set in. It is wider than the pill so a phrase has room,
+/// and at most what the appearance page's preview shows whole in the narrowest settings window.
 pub(crate) const MIN_WIDTH: f32 = 280.;
-pub(crate) const MAX_WIDTH: f32 = 900.;
+pub(crate) const MAX_WIDTH: f32 = 550.;
 /// Three readable lines in a card larger than the controls. Older lines move up out of view.
 pub(crate) const TEXT_HEIGHT: Pixels = px(72.);
 pub(crate) const PADDING_X: Pixels = px(20.);

@@ -28,6 +28,8 @@ use crate::studio::Studio;
 use crate::themes;
 use crate::usage::{Sampler, Usage};
 
+/// The window's size when it opens. It never gets narrower than `WIDTH`, which keeps the column
+/// at its full width so the preview has room for the widest caption.
 const WIDTH: f32 = 760.;
 const HEIGHT: f32 = 720.;
 /// How wide the column of rows, the search field and the category bar grow at most.
@@ -91,7 +93,10 @@ pub fn open(cx: &mut App) {
     {
         return;
     }
-    let options = chrome::options("Tokativ", Size::new(px(WIDTH), px(HEIGHT)), cx);
+    let mut options = chrome::options("Tokativ", Size::new(px(WIDTH), px(HEIGHT)), cx);
+    if let Some(least) = &mut options.window_min_size {
+        least.width = px(WIDTH);
+    }
     match cx.open_window(options, |window, cx| {
         window.set_rem_size(cx.theme().font_size);
         cx.new(|cx| {
