@@ -636,8 +636,19 @@ impl Dispatch<WlKeyboard, ()> for Server {
             return;
         }
         match event {
-            wl_keyboard::Event::Modifiers { mods_depressed, .. } => {
+            // While the keyboard is grabbed KWin stops passing modifiers to the app and leaves
+            // that to the input method, so Shift and Ctrl would otherwise never reach it.
+            wl_keyboard::Event::Modifiers {
+                serial,
+                mods_depressed,
+                mods_latched,
+                mods_locked,
+                group,
+            } => {
                 server.depressed = mods_depressed;
+                if let Some(context) = &server.context {
+                    context.modifiers(serial, mods_depressed, mods_latched, mods_locked, group);
+                }
             }
             wl_keyboard::Event::Key {
                 serial,
