@@ -105,8 +105,6 @@ pub struct Suggested {
     pub id: &'static str,
     pub name: &'static str,
     pub maker: &'static str,
-    /// What the model is good at, and so why one would pick it.
-    pub summary: &'static str,
     pub gpu: Offer,
     pub cpu: Offer,
     /// The download's size, which is about the memory the weights take once loaded. Zero for
@@ -128,8 +126,6 @@ pub const SUGGESTED: &[Suggested] = &[
         id: "handy-computer/parakeet-ultra-gguf/parakeet-ultra-F16.gguf",
         name: "Parakeet Ultra F16",
         maker: "Moondream",
-        summary: "Parakeet v3 trained further, with fewer mistakes in each of its 25 European \
-                  languages. Full precision, which a graphics card runs as fast as a smaller copy.",
         gpu: Offer::Recommended,
         cpu: Offer::No,
         bytes: 1_256_724_448,
@@ -138,9 +134,6 @@ pub const SUGGESTED: &[Suggested] = &[
         id: "handy-computer/parakeet-ultra-gguf/parakeet-ultra-Q8_0.gguf",
         name: "Parakeet Ultra Q8",
         maker: "Moondream",
-        summary: "Parakeet v3 trained further, with fewer mistakes in each of its 25 European \
-                  languages. A compact copy, as accurate as the full one and quicker on a \
-                  processor.",
         gpu: Offer::No,
         cpu: Offer::Recommended,
         bytes: 740_363_168,
@@ -149,7 +142,6 @@ pub const SUGGESTED: &[Suggested] = &[
         id: "handy-computer/whisper-large-v3-turbo-gguf/whisper-large-v3-turbo-Q8_0.gguf",
         name: "Whisper large v3 turbo",
         maker: "OpenAI",
-        summary: "Around 100 languages, for one Parakeet does not know. Slower than Parakeet.",
         gpu: Offer::Yes,
         cpu: Offer::No,
         bytes: 886_381_728,
@@ -158,7 +150,6 @@ pub const SUGGESTED: &[Suggested] = &[
         id: "handy-computer/gigaam-v3-e2e-ctc-gguf/gigaam-v3-e2e-ctc-Q8_0.gguf",
         name: "GigaAM v3",
         maker: "Sber",
-        summary: "Russian only, with punctuation. Small and quick on any computer.",
         gpu: Offer::Yes,
         cpu: Offer::Yes,
         bytes: 272_151_136,
@@ -167,7 +158,6 @@ pub const SUGGESTED: &[Suggested] = &[
         id: tokativ_config::DEFAULT_MODEL,
         name: "Parakeet v3",
         maker: "NVIDIA",
-        summary: "25 European languages with automatic language detection.",
         gpu: Offer::No,
         cpu: Offer::No,
         bytes: 0,
@@ -176,7 +166,6 @@ pub const SUGGESTED: &[Suggested] = &[
         id: "handy-computer/canary-1b-v2-gguf/canary-1b-v2-Q8_0.gguf",
         name: "Canary 1B v2",
         maker: "NVIDIA",
-        summary: "25 European languages with automatic punctuation.",
         gpu: Offer::No,
         cpu: Offer::No,
         bytes: 0,

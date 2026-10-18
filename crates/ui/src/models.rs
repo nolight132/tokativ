@@ -26,14 +26,14 @@ pub(crate) struct Described {
 }
 
 impl Described {
-    /// The description for a model: the curated one for a suggested model, the repository and
-    /// file for anything else.
+    /// The description for a model: the curated name and maker for a suggested model, and the
+    /// repository it comes from for every model.
     pub fn of(id: ModelId) -> Self {
         match models::suggested(&id) {
             Some(suggested) => Self {
                 name: suggested.name.to_owned(),
                 maker: Some(suggested.maker.to_owned()),
-                summary: Some(suggested.summary.to_owned()),
+                summary: Some(id.repo.clone()),
                 recommended: false,
                 bytes: (suggested.bytes > 0).then_some(suggested.bytes),
                 warning: None,
