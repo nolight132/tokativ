@@ -443,6 +443,9 @@ impl Setup {
         }
         .map_or(0, |hardware| hardware.memory);
         let listed = models::offered(gpu, memory, chosen.as_slice());
+        self.library.update(cx, |library, cx| {
+            library.describe(listed.iter().map(|model| model.id.repo.as_str()), cx)
+        });
 
         div()
             .flex()
@@ -486,6 +489,7 @@ impl Setup {
                         &self.library,
                         Some(radio),
                         Some(Box::new(choose)),
+                        None,
                         chrome::GROUP_PADDING,
                         crate::nested_radius(chrome::GROUP_RADIUS, px(1.)),
                         cx,

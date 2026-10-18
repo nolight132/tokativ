@@ -297,6 +297,15 @@ pub fn parse(markdown: &str) -> Vec<Block> {
     reader.blocks
 }
 
+/// The text of the first paragraph that has any, which on most model cards says what the model
+/// is. A paragraph of only badges reads empty, since images are left out, and is passed over.
+pub fn first_paragraph(blocks: &[Block]) -> Option<&str> {
+    blocks.iter().find_map(|block| match block {
+        Block::Paragraph(inline) => Some(inline.text.trim()).filter(|text| !text.is_empty()),
+        _ => None,
+    })
+}
+
 /// Draws `blocks`. Links open in the browser, relative ones against `base`, the repository's
 /// page on Hugging Face.
 pub fn render(blocks: &[Block], base: &str, cx: &App) -> AnyElement {
@@ -574,5 +583,15 @@ mod tests {
             "https://huggingface.co/moondream/parakeet-ultra"
         );
         assert_eq!(absolute("https://a.b/c", base), "https://a.b/c");
+    }
+
+    #[test]
+    fn the_first_paragraph_skips_badges() {
+        let card = "---\nlicense: mit\n---\n# Title\n\n![badge](b.svg)\n\nGGUF conversions of [a/b](https://x) for use\nwith c.\n\nMore.\n";
+        let blocks = parse(card);
+        assert_eq!(
+            first_paragraph(&blocks),
+            Some("GGUF conversions of a/b for use with c.")
+        );
     }
 }

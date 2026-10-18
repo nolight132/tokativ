@@ -4,7 +4,7 @@ use gpui::prelude::*;
 use gpui::{AnyElement, App, ClickEvent, Entity, Pixels, SharedString, Window, div, px};
 use tokativ_engine::ModelId;
 use tokativ_engine::models::{self, RemoteFile, Repository};
-use ui::{ActiveTheme as _, Button, Text};
+use ui::{ActiveTheme as _, Button, Perch, Text, Tipped as _};
 
 use crate::chrome::{self, meter};
 use crate::host::{Library, ModelState};
@@ -100,15 +100,19 @@ pub(crate) fn offered(gpu: bool, memory: u64, also: &[ModelId]) -> Vec<Described
         .collect()
 }
 
-/// One model's row: its name and maker, what it is good at, where it stands on disk, and the
-/// button that changes that. `leading` goes in front, such as a radio. `choose` runs when an
-/// installed model's row is clicked, and such a row shades under the pointer with `radius`
-/// corners. `inset` is the room on either side of the content.
+/// One model's row: its name and maker, the first paragraph of its model card on one line, where
+/// it stands on disk, and the button that changes that. Until the card is in, the line names the
+/// repository. `leading` goes in front, such as a radio. `choose` runs when an installed model's
+/// row is clicked, and such a row shades under the pointer with `radius` corners. `page` opens
+/// the model's page, from a button beside the action. `inset` is the room on either side of
+/// the content.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn model_row(
     model: Described,
     library: &Entity<Library>,
     leading: Option<AnyElement>,
     choose: Option<Choose>,
+    page: Option<Choose>,
     inset: Pixels,
     radius: Pixels,
     cx: &App,
@@ -167,6 +171,11 @@ pub(crate) fn model_row(
             }
         }
     };
+    let summary = library
+        .read(cx)
+        .description(&model.id.repo)
+        .map(str::to_owned)
+        .or(model.summary);
     let installed = matches!(state, ModelState::Installed { .. });
     let small = theme.text(Text::Small);
     div()
@@ -209,9 +218,12 @@ pub(crate) fn model_row(
                         })
                         .when(model.recommended, |this| this.child(tag("Recommended", cx))),
                 )
-                .when_some(model.summary, |this, summary| {
+                .when_some(summary, |this, summary| {
                     this.child(
                         div()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
                             .text_size(small)
                             .text_color(theme.muted_foreground)
                             .child(summary),
@@ -235,7 +247,28 @@ pub(crate) fn model_row(
                         .child(status),
                 ),
         )
-        .child(div().flex_none().child(action))
+        .child(
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap_1()
+                .when_some(page, |this, page| {
+                    this.child(
+                        div()
+                            .id(SharedString::from(format!("page-tip-{key}")))
+                            .tip_label("Model page", Perch::Pointer)
+                            .child(
+                                Button::new(SharedString::from(format!("page-{key}")))
+                                    .icon("icons/info.svg")
+                                    .small()
+                                    .ghost()
+                                    .on_click(page),
+                            ),
+                    )
+                })
+                .child(action),
+        )
         .into_any_element()
 }
 

@@ -352,26 +352,10 @@ impl Library {
             return;
         }
         self.search.files.insert(repo.clone(), Files::Loading);
-        self.search.cards.insert(repo.clone(), Card::Loading);
+        if matches!(self.search.cards.get(&repo), None | Some(Card::Failed(_))) {
+            self.load_card(repo.clone(), cx);
+        }
         cx.notify();
-        let carded = repo.clone();
-        let reading = cx.background_spawn(async move {
-            models::model_card(&carded).map(|card| crate::markdown::parse(&card))
-        });
-        let card_repo = repo.clone();
-        cx.spawn(async move |this, cx| {
-            let card = reading.await;
-            this.update(cx, |this, cx| {
-                let card = match card {
-                    Ok(blocks) => Card::Loaded(std::sync::Arc::new(blocks)),
-                    Err(error) => Card::Failed(format!("{error:#}")),
-                };
-                this.search.cards.insert(card_repo, card);
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
         let listed = repo.clone();
         let request = cx.background_spawn(async move { models::repository_files(&listed) });
         cx.spawn(async move |this, cx| {
@@ -382,6 +366,49 @@ impl Library {
                     Err(error) => Files::Failed(format!("{error:#}")),
                 };
                 this.search.files.insert(repo, files);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Fetches the model cards of `repos` that were never asked for, so their rows can show the
+    /// card's first paragraph. It notifies only when a card arrives, so a render may call it.
+    pub fn describe<'a>(
+        &mut self,
+        repos: impl IntoIterator<Item = &'a str>,
+        cx: &mut Context<Self>,
+    ) {
+        for repo in repos {
+            if !self.search.cards.contains_key(repo) {
+                self.load_card(repo.to_owned(), cx);
+            }
+        }
+    }
+
+    /// The first paragraph of `repo`'s model card, once the card is in.
+    pub fn description(&self, repo: &str) -> Option<&str> {
+        match self.search.cards.get(repo)? {
+            Card::Loaded(blocks) => crate::markdown::first_paragraph(blocks),
+            Card::Loading | Card::Failed(_) => None,
+        }
+    }
+
+    fn load_card(&mut self, repo: String, cx: &mut Context<Self>) {
+        self.search.cards.insert(repo.clone(), Card::Loading);
+        let carded = repo.clone();
+        let reading = cx.background_spawn(async move {
+            models::model_card(&carded).map(|card| crate::markdown::parse(&card))
+        });
+        cx.spawn(async move |this, cx| {
+            let card = reading.await;
+            this.update(cx, |this, cx| {
+                let card = match card {
+                    Ok(blocks) => Card::Loaded(std::sync::Arc::new(blocks)),
+                    Err(error) => Card::Failed(format!("{error:#}")),
+                };
+                this.search.cards.insert(repo, card);
                 cx.notify();
             })
             .ok();

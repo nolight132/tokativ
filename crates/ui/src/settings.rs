@@ -274,6 +274,9 @@ pub struct Settings {
     exploring: bool,
     /// The search result whose files are listed.
     opened: Option<String>,
+    /// Whether the listed repository was opened from the installed models, so going back
+    /// returns to them rather than to the search results.
+    opened_from_models: bool,
     page: Page,
     /// How tall the header floating over the column measured last, so the rows start beneath it.
     header_height: Pixels,
@@ -362,6 +365,7 @@ impl Settings {
             searched: String::new(),
             exploring: false,
             opened: None,
+            opened_from_models: false,
             page: Page::General,
             header_height: Pixels::ZERO,
             header_measured: false,
@@ -430,6 +434,7 @@ impl Settings {
         self.page = Page::Model;
         self.exploring = exploring;
         self.opened = None;
+        self.opened_from_models = false;
         if !self.search.read(cx).text().is_empty() {
             self.search.update(cx, |input, cx| input.set_text("", cx));
         }
@@ -439,6 +444,23 @@ impl Settings {
             let focus = self.model_search.focus_handle(cx);
             focus.focus(window, cx);
         }
+        cx.notify();
+    }
+
+    /// Opens a model's page, its model card and files, from the model list. Going back from it
+    /// returns to the list.
+    fn open_model_page(&mut self, repo: String, cx: &mut Context<Self>) {
+        self.page = Page::Model;
+        self.exploring = true;
+        if !self.search.read(cx).text().is_empty() {
+            self.search.update(cx, |input, cx| input.set_text("", cx));
+        }
+        self.library
+            .update(cx, |library, cx| library.open_repository(repo.clone(), cx));
+        self.opened = Some(repo);
+        self.opened_from_models = true;
+        self.scroll_to_top(cx);
+        self.reveal(cx);
         cx.notify();
     }
 
@@ -1220,8 +1242,13 @@ impl Settings {
     fn models(&self, config: &Config, cx: &mut Context<Self>) -> AnyElement {
         let chosen = ModelId::parse(&config.model);
         let listed = models::listed(self.library.read(cx), &[]);
+        self.library.update(cx, |library, cx| {
+            library.describe(listed.iter().map(|model| model.id.repo.as_str()), cx)
+        });
         let rows = listed.into_iter().map(|model| {
             let id = model.id.clone();
+            let repo = id.repo.clone();
+            let page = cx.listener(move |this, _, _, cx| this.open_model_page(repo.clone(), cx));
             let radio = Radio::new(
                 SharedString::from(format!("use-{}", id.key())),
                 Some(&id) == chosen.as_ref(),
@@ -1239,6 +1266,7 @@ impl Settings {
                     &self.library,
                     Some(radio),
                     Some(Box::new(choose)),
+                    Some(Box::new(page)),
                     HOVER_REACH,
                     cx.theme().radius,
                     cx,
@@ -1596,15 +1624,15 @@ impl Settings {
                 .icon("icons/chevron-left.svg")
                 .small()
                 .ghost()
-                .on_click(
-                    cx.listener(|this, _, window, cx| match this.opened.is_some() {
+                .on_click(cx.listener(|this, _, window, cx| {
+                    match this.opened.is_some() && !this.opened_from_models {
                         true => {
                             this.opened = None;
                             cx.notify();
                         }
                         false => this.explore(false, window, cx),
-                    }),
-                )
+                    }
+                }))
         };
 
         let theme = *cx.theme();
@@ -1644,7 +1672,13 @@ impl Settings {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(div().flex().child(back("Results", cx)))
+                    .child(div().flex().child(back(
+                        match self.opened_from_models {
+                            true => "Models",
+                            false => "Results",
+                        },
+                        cx,
+                    )))
                     .child(
                         div()
                             .flex()
@@ -1744,6 +1778,7 @@ impl Settings {
                                                 library.open_repository(repo.clone(), cx)
                                             });
                                             this.opened = Some(repo.clone());
+                                            this.opened_from_models = false;
                                             cx.notify();
                                         });
                                         models::result_row(repository, Box::new(open), cx)
