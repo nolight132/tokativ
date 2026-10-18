@@ -1,5 +1,6 @@
 //! The insertion worker: one Wayland connection that drives the input method and the virtual
-//! keyboard on behalf of [`crate::Inserter`].
+//! keyboard on behalf of [`crate::Inserter`]. On KWin it drives Tokativ's own input method
+//! through [`Bridge`] instead and presses keys through KWin's fake input.
 
 use std::collections::VecDeque;
 use std::io::{ErrorKind, Write as _};
@@ -25,9 +26,11 @@ use wayland_protocols_misc::zwp_input_method_v2::client::zwp_input_method_v2::{
 };
 use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1;
 use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1;
+use wayland_protocols_plasma::fake_input::client::org_kde_kwin_fake_input::OrgKdeKwinFakeInput;
 
 use crate::keymap::{self, KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_V, MOD_CTRL, MOD_SHIFT};
-use crate::{Backend, Key, KeyHandler, Method, Request, Status, clipboard, focus};
+use crate::kwin::{self, Bridge, Order, Report};
+use crate::{Backend, Key, KeyHandler, Method, Request, Shared, Status, clipboard, focus};
 
 /// The input method protocol rejects longer strings.
 const MAX_STRING: usize = 4000;
@@ -51,6 +54,11 @@ const SHORTCUT_MODS: u32 = 1 | 4 | 8 | 64;
 /// press. Compositors that route virtual keys through the seat echo them within a millisecond or
 /// two, and no one presses a key twice this fast.
 const ECHO: Duration = Duration::from_millis(50);
+/// How often the worker looks for KWin's input method while it is not connected, since KWin
+/// starts it whenever it is chosen in System Settings.
+const RETRY: Duration = Duration::from_secs(1);
+/// How long the input method gets to say whether an insertion reached a text field.
+const ANSWER: Duration = Duration::from_secs(1);
 
 /// The protocol state the dispatch callbacks write into.
 struct State {
@@ -89,6 +97,15 @@ struct Worker {
     /// Whether this session already waited out [`ACTIVATION`] once.
     waited: bool,
     started: Instant,
+    shared: Shared,
+    /// Whether this is KWin and the input method is wanted, so the worker keeps looking for
+    /// Tokativ's own.
+    kwin: bool,
+    bridge: Option<Bridge>,
+    retried: Instant,
+    /// KWin's way to press keys, for the paste chord where there is no virtual keyboard.
+    fake_input: Option<OrgKdeKwinFakeInput>,
+    session: bool,
 }
 
 pub(crate) fn run(
@@ -96,10 +113,10 @@ pub(crate) fn run(
     terminals: Vec<String>,
     requests: Receiver<Request>,
     ready: SyncSender<Result<Status>>,
-    before: Arc<Mutex<Option<String>>>,
+    shared: Shared,
     keys: KeyHandler,
 ) {
-    let mut worker = match Worker::connect(preferred, terminals, before, keys) {
+    let mut worker = match Worker::connect(preferred, terminals, shared, keys) {
         Ok((worker, status)) => {
             ready.send(Ok(status)).ok();
             worker
@@ -143,7 +160,7 @@ impl Worker {
     fn connect(
         preferred: Backend,
         terminals: Vec<String>,
-        before: Arc<Mutex<Option<String>>>,
+        shared: Shared,
         keys: KeyHandler,
     ) -> Result<(Self, Status)> {
         let connection = Connection::connect_to_env().context("connecting to Wayland")?;
@@ -155,12 +172,31 @@ impl Worker {
             .context("the compositor has no seat")?;
         let input_methods = bind::<ZwpInputMethodManagerV2>(&globals, &handle);
         let keyboards = bind::<ZwpVirtualKeyboardManagerV1>(&globals, &handle);
-        let status = choose(
-            preferred,
-            input_methods.is_some(),
-            keyboards.is_some(),
-            focus::other_input_method(),
-        );
+        // Only KWin has fake input, and it is the one way to press keys there.
+        let fake_input = globals
+            .bind::<OrgKdeKwinFakeInput, State, ()>(&handle, 4..=5, ())
+            .ok();
+        if let Some(fake_input) = &fake_input {
+            fake_input.authenticate("Tokativ".into(), "Pastes dictated text".into());
+        }
+        let kwin = input_methods.is_none()
+            && fake_input.is_some()
+            && matches!(preferred, Backend::Auto | Backend::InputMethod);
+        if kwin && let Err(error) = kwin::register() {
+            log::warn!("insert: cannot offer the input method to KWin: {error:#}");
+        }
+        let bridge = kwin.then(Bridge::connect).flatten();
+        let status = match kwin {
+            true => kwin_status(bridge.is_some()),
+            false => choose(
+                preferred,
+                input_methods.is_some(),
+                keyboards.is_some(),
+                focus::other_input_method(),
+            ),
+        };
+        shared.set_status(status.clone());
+        let before = shared.before.clone();
         let worker = Self {
             connection,
             queue,
@@ -186,6 +222,12 @@ impl Worker {
             grab: None,
             waited: false,
             started: Instant::now(),
+            shared,
+            kwin,
+            bridge,
+            retried: Instant::now(),
+            fake_input,
+            session: false,
         };
         Ok((worker, status))
     }
@@ -206,7 +248,12 @@ impl Worker {
     fn begin(&mut self) -> Result<()> {
         self.end()?;
         self.waited = false;
+        self.session = true;
         if self.method != Method::InputMethod {
+            return Ok(());
+        }
+        if self.bridge.is_some() {
+            self.order(Order::Begin);
             return Ok(());
         }
         let Some(manager) = &self.input_methods else {
@@ -250,6 +297,10 @@ impl Worker {
     }
 
     fn preedit(&mut self, text: &str) -> Result<()> {
+        if self.bridge.is_some() {
+            self.order(Order::Preedit(text.into()));
+            return Ok(());
+        }
         if !self.state.active {
             return Ok(());
         }
@@ -271,6 +322,9 @@ impl Worker {
             .is_some_and(|app| self.terminals.contains(&app));
         if x11 {
             log::debug!("insert: {} bytes into an X11 window", text.len());
+        } else if self.bridge_insert(text, preedit) {
+            log::debug!("insert: {} bytes through KWin's input method", text.len());
+            return Ok(());
         } else if let Some(input_method) = self.active_input_method()? {
             log::debug!("insert: {} bytes through the input method", text.len());
             for chunk in chunks(text, MAX_STRING) {
@@ -284,12 +338,14 @@ impl Worker {
         } else {
             log::debug!("insert: {} bytes, no active input method", text.len());
         }
-        match (self.method, x11, self.keyboards.is_some()) {
-            (Method::Clipboard, _, true) | (_, true, true) => {
-                self.ungrabbed(|worker| worker.paste(text, terminal))
-            }
-            (_, false, true) => self.ungrabbed(|worker| worker.type_text(text)),
-            (_, _, false) => {
+        let presses = self.keyboards.is_some() || self.fake_input.is_some();
+        // Only a virtual keyboard can type. KWin's fake input presses keys of the user's own
+        // keymap, which is enough for the paste chord.
+        let paste = self.method == Method::Clipboard || x11 || self.keyboards.is_none();
+        match (presses, paste) {
+            (true, true) => self.ungrabbed(|worker| worker.paste(text, terminal)),
+            (true, false) => self.ungrabbed(|worker| worker.type_text(text)),
+            (false, _) => {
                 clipboard::offer(text)?;
                 log::warn!("insert: no way to send keys, the text is on the clipboard");
                 Ok(())
@@ -297,7 +353,90 @@ impl Worker {
         }
     }
 
+    /// Commits `text` through KWin's input method when a text field is focused, and says
+    /// whether it did.
+    fn bridge_insert(&mut self, text: &str, preedit: &str) -> bool {
+        // Whatever the input method reported meanwhile, such as a field gaining focus, counts.
+        self.listen(Duration::ZERO);
+        if !self.bridge.as_ref().is_some_and(|bridge| bridge.active) {
+            return false;
+        }
+        self.order(Order::Insert {
+            text: text.into(),
+            preedit: preedit.into(),
+        });
+        let deadline = Instant::now() + ANSWER;
+        while self.bridge.is_some() && Instant::now() < deadline {
+            if let Some(inserted) = self.listen(TICK) {
+                return inserted;
+            }
+        }
+        log::warn!("insert: KWin's input method did not answer");
+        false
+    }
+
+    /// Sends `order` to KWin's input method, and lets it go if it is gone.
+    fn order(&mut self, order: Order) {
+        let Some(bridge) = &mut self.bridge else {
+            return;
+        };
+        if let Err(error) = bridge.send(&order) {
+            self.lose_bridge(error);
+        }
+    }
+
+    /// Handles what KWin's input method has sent, waiting up to `timeout` for something to
+    /// arrive. Returns the answer to an insertion, if one came.
+    fn listen(&mut self, timeout: Duration) -> Option<bool> {
+        let bridge = self.bridge.as_mut()?;
+        let reports = match bridge.receive(timeout) {
+            Ok(reports) => reports,
+            Err(error) => {
+                self.lose_bridge(error);
+                return None;
+            }
+        };
+        let mut inserted = None;
+        for report in reports {
+            match report {
+                Report::Active(_) => {}
+                Report::Before(before) => self.shared.set_before(before),
+                Report::Key(key) => (self.state.keys)(key.into()),
+                Report::Inserted(answer) => inserted = Some(answer),
+            }
+        }
+        inserted
+    }
+
+    /// Connects to KWin's input method once KWin has started it, at most every [`RETRY`].
+    fn look_for_bridge(&mut self) {
+        if !self.kwin || self.bridge.is_some() || self.retried.elapsed() < RETRY {
+            return;
+        }
+        self.retried = Instant::now();
+        let Some(bridge) = Bridge::connect() else {
+            return;
+        };
+        log::info!("insert: connected to KWin's input method");
+        self.bridge = Some(bridge);
+        self.method = Method::InputMethod;
+        self.shared.set_status(kwin_status(true));
+        if self.session {
+            self.order(Order::Begin);
+        }
+    }
+
+    fn lose_bridge(&mut self, error: anyhow::Error) {
+        log::warn!("insert: lost KWin's input method: {error:#}");
+        self.bridge = None;
+        self.retried = Instant::now();
+        self.method = Method::Clipboard;
+        self.shared.set_status(kwin_status(false));
+    }
+
     fn end(&mut self) -> Result<()> {
+        self.session = false;
+        self.order(Order::End);
         self.ungrab_keys();
         let Some(input_method) = self.input_method.take() else {
             return Ok(());
@@ -393,6 +532,43 @@ impl Worker {
     fn paste(&mut self, text: &str, terminal: bool) -> Result<()> {
         let previous = clipboard::save();
         clipboard::offer(text)?;
+        match self.keyboards.is_some() {
+            true => self.virtual_chord(terminal)?,
+            false => self.fake_chord(terminal)?,
+        }
+        thread::sleep(PASTE_SETTLE);
+        clipboard::restore(previous);
+        Ok(())
+    }
+
+    /// Presses the paste chord through KWin's fake input. The keys go through KWin like real
+    /// ones, with the user's keymap.
+    fn fake_chord(&mut self, terminal: bool) -> Result<()> {
+        let fake_input = self
+            .fake_input
+            .clone()
+            .ok_or_else(|| anyhow!("the compositor has no way to press keys"))?;
+        let mut chord = vec![KEY_LEFTCTRL];
+        if terminal {
+            chord.push(KEY_LEFTSHIFT);
+        }
+        chord.push(KEY_V);
+        for (code, pressed) in chord
+            .iter()
+            .map(|code| (*code, true))
+            .chain(chord.iter().rev().map(|code| (*code, false)))
+        {
+            fake_input.keyboard_key(code, pressed as u32);
+            self.queue
+                .roundtrip(&mut self.state)
+                .context("pressing a key")?;
+            thread::sleep(KEY_GAP);
+        }
+        Ok(())
+    }
+
+    /// Sends the paste chord through a virtual keyboard with a keymap of its own.
+    fn virtual_chord(&mut self, terminal: bool) -> Result<()> {
         let keyboard = self.virtual_keyboard()?;
         self.upload(&keyboard, &keymap::paste())?;
         let mut mods = MOD_CTRL;
@@ -413,8 +589,6 @@ impl Worker {
         self.queue
             .roundtrip(&mut self.state)
             .context("sending the paste chord")?;
-        thread::sleep(PASTE_SETTLE);
-        clipboard::restore(previous);
         Ok(())
     }
 
@@ -477,7 +651,28 @@ impl Worker {
         self.queue.dispatch_pending(&mut self.state)?;
         // Keys forwarded by the dispatch callbacks go out now rather than at the next tick.
         self.connection.flush()?;
+        self.look_for_bridge();
+        self.listen(Duration::ZERO);
         Ok(())
+    }
+}
+
+/// The method on KWin, where the input method is Tokativ's own once KWin has started it, and
+/// the paste is the only other way.
+fn kwin_status(connected: bool) -> Status {
+    match connected {
+        true => Status {
+            method: Method::InputMethod,
+            note: None,
+        },
+        false => {
+            Status {
+                method: Method::Clipboard,
+                note: Some(kwin::absence().unwrap_or_else(|| {
+                    "KWin has not started Tokativ's input method yet".to_string()
+                })),
+            }
+        }
     }
 }
 
@@ -526,7 +721,7 @@ fn choose(
 }
 
 /// Splits `text` into pieces of at most `limit` bytes on character boundaries.
-fn chunks(text: &str, limit: usize) -> impl Iterator<Item = &str> {
+pub(crate) fn chunks(text: &str, limit: usize) -> impl Iterator<Item = &str> {
     let mut rest = text;
     std::iter::from_fn(move || {
         if rest.is_empty() {
@@ -680,6 +875,7 @@ wayland_client::delegate_noop!(State: ignore WlSeat);
 wayland_client::delegate_noop!(State: ignore ZwpInputMethodManagerV2);
 wayland_client::delegate_noop!(State: ignore ZwpVirtualKeyboardManagerV1);
 wayland_client::delegate_noop!(State: ignore ZwpVirtualKeyboardV1);
+wayland_client::delegate_noop!(State: ignore OrgKdeKwinFakeInput);
 
 #[cfg(test)]
 mod tests {

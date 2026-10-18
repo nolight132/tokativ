@@ -13,11 +13,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and tap again to finish as before. It works on macOS, Windows, Hyprland, Sway, river and niri.
   Setup shows the new bindings, which run `tokativ press` and `tokativ release`, or
   `tokativ hold` on niri, which cannot run a command when a key comes up.
+- The input method on KDE Plasma. KWin keeps it for the program chosen under System Settings →
+  Keyboard → Virtual Keyboard, so Tokativ offers itself there and picks itself once when nothing
+  else is chosen. Text, live drafts, and Escape and Enter during a session then work in Plasma
+  apps as they do on niri.
 
 ### Fixed
 
 - The niri and Sway bindings from setup no longer start and finish dictation over and over
   while the key is held.
+- On Plasma, text the input method cannot reach, as in X11 apps, is pasted with KWin's fake
+  input. It used to be left on the clipboard.
 
 ## [0.4.0] - 2026-10-18
 

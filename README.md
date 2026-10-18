@@ -60,7 +60,8 @@ put it on your `PATH` as `tokativ`. It needs glibc 2.35+, the Vulkan loader, Way
 and alsa-lib.
 
 Tokativ needs a compositor with layer shell, such as niri, Hyprland, Sway, river or KDE Plasma.
-GNOME does not work.
+GNOME does not work. On Plasma, Tokativ is the input method chosen under System Settings →
+Keyboard → Virtual Keyboard, and picks itself there on first start when nothing else is chosen.
 
 ### macOS
 

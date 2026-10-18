@@ -1,7 +1,8 @@
 //! Puts dictated text into the focused app. On Wayland three ways are tried in order: the input
 //! method protocol, a virtual keyboard that types each character, and the clipboard followed by
-//! a paste chord. macOS and Windows have no input method to hook into, so text is typed as
-//! keyboard events or pasted.
+//! a paste chord. KWin keeps its input method for a program it starts itself, which is
+//! [`serve_input_method`]. macOS and Windows have no input method to hook into, so text is typed
+//! as keyboard events or pasted.
 
 #[cfg(target_os = "linux")]
 mod clipboard;
@@ -9,6 +10,8 @@ mod clipboard;
 mod focus;
 #[cfg(target_os = "linux")]
 mod keymap;
+#[cfg(target_os = "linux")]
+mod kwin;
 #[cfg(not(target_os = "linux"))]
 mod native;
 #[cfg(target_os = "linux")]
@@ -23,6 +26,8 @@ pub use tokativ_config::Backend;
 
 #[cfg(target_os = "linux")]
 pub use focus::{focused_app_id, focused_output, other_input_method};
+#[cfg(target_os = "linux")]
+pub use kwin::serve as serve_input_method;
 /// The worker that serves [`Request`]s on this platform.
 #[cfg(not(target_os = "linux"))]
 use native as backend;
@@ -66,6 +71,23 @@ pub enum Key {
 /// Runs on the insertion thread when Escape or Enter is pressed during a session.
 pub(crate) type KeyHandler = Box<dyn Fn(Key) + Send>;
 
+/// What the worker shares with the [`Inserter`].
+pub(crate) struct Shared {
+    /// The text left of the cursor in the focused field, when the input method knows it.
+    pub before: Arc<Mutex<Option<String>>>,
+    pub status: Arc<Mutex<Status>>,
+}
+
+impl Shared {
+    pub fn set_status(&self, status: Status) {
+        *self.status.lock().expect("status lock") = status;
+    }
+
+    pub fn set_before(&self, before: Option<String>) {
+        *self.before.lock().expect("before lock") = before;
+    }
+}
+
 #[cfg_attr(
     not(target_os = "linux"),
     allow(
@@ -101,7 +123,16 @@ impl Inserter {
         let (requests, receiver) = mpsc::channel();
         let (ready, probed) = mpsc::sync_channel(1);
         let before = Arc::new(Mutex::new(None));
-        let shared = before.clone();
+        // The worker writes the real status before it reports ready, and again whenever the
+        // method changes, as when KWin starts or stops the input method.
+        let status = Arc::new(Mutex::new(Status {
+            method: Method::Clipboard,
+            note: None,
+        }));
+        let shared = Shared {
+            before: before.clone(),
+            status: status.clone(),
+        };
         thread::Builder::new()
             .name("insert".into())
             .spawn(move || {
@@ -115,13 +146,13 @@ impl Inserter {
                 )
             })
             .context("spawning the insertion thread")?;
-        let status = probed
+        let probed = probed
             .recv()
             .map_err(|_| anyhow!("the insertion thread exited during startup"))??;
         log::info!(
             "insert: using {}{}",
-            status.method.name(),
-            status
+            probed.method.name(),
+            probed
                 .note
                 .as_deref()
                 .map(|note| format!(" ({note})"))
@@ -129,7 +160,7 @@ impl Inserter {
         );
         Ok(Self {
             requests,
-            status: Arc::new(Mutex::new(status)),
+            status,
             before,
         })
     }
