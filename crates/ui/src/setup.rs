@@ -644,7 +644,19 @@ impl Setup {
                     .child(ui::eyebrow(format!("{} detected", desktop.name()), cx)),
             )
             .child(intro(desktop.directions(), cx))
-            .when(desktop.supported(), |this| {
+            .when(desktop.own_shortcut(), |this| {
+                this.child(
+                    div().flex().gap_2().child(
+                        Button::new("open-shortcuts")
+                            .label("Open Shortcuts")
+                            .icon("icons/external-link.svg")
+                            .small()
+                            .outline()
+                            .on_click(move |_, _, _| desktop.open_shortcuts()),
+                    ),
+                )
+            })
+            .when(desktop.supported() && !desktop.own_shortcut(), |this| {
                 this.child(chrome::code(snippet, cx)).child(actions)
             })
     }
