@@ -166,6 +166,8 @@ enum Slot {
     Models,
     Explore,
     Runtime,
+    /// Runs the first-run setup again, in development builds.
+    Rerun,
     Vocabulary,
     LiveText,
     Hotkey,
@@ -461,13 +463,11 @@ impl Settings {
     /// The slots of one category, group labels included.
     fn page_slots(&self, page: Page, _cx: &App) -> Vec<Slot> {
         match page {
-            Page::Model => vec![
-                Slot::Models,
-                Slot::Explore,
-                Slot::Runtime,
-                Slot::Title("Vocabulary"),
-                Slot::Vocabulary,
-            ],
+            Page::Model => [Slot::Models, Slot::Explore, Slot::Runtime]
+                .into_iter()
+                .chain(development().then_some(Slot::Rerun))
+                .chain([Slot::Title("Vocabulary"), Slot::Vocabulary])
+                .collect(),
             Page::Dictation => [
                 match cfg!(target_os = "linux") {
                     true => Slot::LiveText,
@@ -567,6 +567,10 @@ impl Settings {
                     Some(device) => format!("Running on {}.", device.name),
                     None => "Where the model runs.".to_owned(),
                 }),
+            ),
+            Slot::Rerun => plain(
+                "Setup",
+                "Run the first-run setup again. Only development builds show this.",
             ),
             Slot::Vocabulary => plain(
                 "Names and terms",
@@ -692,6 +696,14 @@ impl Settings {
             Slot::Models => self.models(config, cx),
             Slot::Explore => self.explore_row(cx),
             Slot::Runtime => self.runtime(config, cx),
+            Slot::Rerun => {
+                let button = Button::new("rerun-setup")
+                    .label("Run setup")
+                    .small()
+                    .outline()
+                    .on_click(cx.listener(|this, _, window, cx| this.rerun_setup(window, cx)));
+                self.row(slot, button, cx)
+            }
             Slot::Vocabulary => self.vocabulary(config, cx),
             Slot::LiveText => {
                 let live = config.live_preview;
@@ -880,6 +892,16 @@ impl Settings {
             Slot::Resources => self.resources(config, cx),
             Slot::Version => self.row(slot, div(), cx),
         }
+    }
+
+    /// Starts the setup over in this window, as on the first run. Finishing it marks it done
+    /// again and brings the settings back.
+    fn rerun_setup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.store.update(cx, |store, cx| {
+            store.update(|config| config.setup_done = false, cx)
+        });
+        self.setup = Some(cx.new(|cx| Setup::begin(window, cx)));
+        cx.notify();
     }
 
     /// A row with a switch that flips one boolean in the config.
@@ -2028,6 +2050,12 @@ fn reading(reading: Reading, cx: &App) -> AnyElement {
                 .child(reading.of),
         )
         .into_any_element()
+}
+
+/// Whether this is a development build, or one run with `TOKATIV_DEV` set, which shows tools for
+/// working on the app.
+fn development() -> bool {
+    cfg!(debug_assertions) || std::env::var_os("TOKATIV_DEV").is_some_and(|value| !value.is_empty())
 }
 
 /// A virtualized list on a raised surface, filling the space left on the page.
