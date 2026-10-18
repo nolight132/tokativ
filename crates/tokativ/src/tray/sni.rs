@@ -24,7 +24,9 @@ impl Tray {
             recording,
             shown,
         };
+        // The panel may start after the daemon at login, so the item waits for its watcher.
         let handle = item
+            .assume_sni_available(true)
             .spawn()
             .context("cannot reach the status notifier host")?;
         Ok(Self { handle })
