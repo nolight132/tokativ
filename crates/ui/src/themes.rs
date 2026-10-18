@@ -1,7 +1,9 @@
-//! The color themes: Sonora's built-in ones and the custom ones in the themes folder, which are
-//! JSON files in the format Sonora reads, so a theme written for one works in the other.
+//! The color themes: Sonora's built-in ones, the theme files that ship with the app, and the
+//! custom ones in the themes folder. Theme files are JSON in the format Sonora reads, so a theme
+//! written for one works in the other.
 
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use anyhow::{Context as _, Result};
 use gpui::{App, Global};
@@ -14,7 +16,22 @@ const FORMAT_VERSION: u32 = 1;
 /// The themes that come with the app. Sonora's other palettes are left out on purpose.
 pub const BUILT_IN: [ThemeKind; 3] = [ThemeKind::System, ThemeKind::Dark, ThemeKind::Light];
 
-/// A theme from the themes folder, laid over the dark theme.
+/// The theme files that ship inside the app, by id, in the order the settings show them. Their
+/// ids are taken, so a custom file named like one of them is left out.
+const BUNDLED_FILES: [(&str, &str); 3] = [
+    ("rose-pine", include_str!("../themes/rose-pine.json")),
+    ("nord", include_str!("../themes/nord.json")),
+    ("dracula", include_str!("../themes/dracula.json")),
+];
+
+static BUNDLED: LazyLock<Vec<Custom>> = LazyLock::new(|| {
+    BUNDLED_FILES
+        .into_iter()
+        .map(|(id, json)| parse(json.as_bytes(), id.to_owned()).expect("a bundled theme parses"))
+        .collect()
+});
+
+/// A theme from a theme file, laid over the dark theme.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Custom {
     /// The file name without `.json`, which the config names the theme by.
@@ -81,10 +98,20 @@ pub fn refresh(cx: &mut App) {
     Theme::set(look(cx), &overrides(cx), cx);
 }
 
+/// The theme files that ship with the app.
+pub fn bundled() -> &'static [Custom] {
+    &BUNDLED
+}
+
 /// The custom themes, sorted by name.
 pub fn custom(cx: &App) -> &[Custom] {
     cx.try_global::<Themes>()
         .map_or(&[], |themes| themes.custom.as_slice())
+}
+
+/// Every theme read from a file, the bundled ones first.
+fn files(cx: &App) -> impl Iterator<Item = &Custom> {
+    bundled().iter().chain(custom(cx))
 }
 
 /// The name of the theme with `id`, if there is one.
@@ -92,8 +119,7 @@ pub fn name(id: &str, cx: &App) -> Option<String> {
     if let Some(kind) = BUILT_IN.into_iter().find(|kind| kind.id() == id) {
         return Some(kind.label().to_string());
     }
-    custom(cx)
-        .iter()
+    files(cx)
         .find(|theme| theme.id == id)
         .map(|theme| theme.name.clone())
 }
@@ -106,7 +132,7 @@ pub struct Swatch {
     pub palettes: Vec<Theme>,
 }
 
-/// Every theme there is to pick, built-in ones first.
+/// Every theme there is to pick: built-in ones, then bundled ones, then custom ones.
 pub fn swatches(cx: &App) -> Vec<Swatch> {
     let built = |kind| Theme::for_look(look_of(kind), &ThemeOverrides::default());
     let built_in = BUILT_IN.into_iter().map(|kind| Swatch {
@@ -117,19 +143,19 @@ pub fn swatches(cx: &App) -> Vec<Swatch> {
             kind => vec![built(kind)],
         },
     });
-    let custom = custom(cx).iter().map(|theme| Swatch {
+    let files = files(cx).map(|theme| Swatch {
         id: theme.id.clone(),
         name: theme.name.clone(),
         palettes: vec![Theme::for_look(look_of(ThemeKind::Dark), &theme.overrides)],
     });
-    built_in.chain(custom).collect()
+    built_in.chain(files).collect()
 }
 
 fn look(cx: &App) -> Look {
     let selected = cx
         .try_global::<Themes>()
         .map_or("system", |themes| themes.selected.as_str());
-    // A custom theme is laid over the dark one.
+    // A theme from a file is laid over the dark one.
     look_of(
         BUILT_IN
             .into_iter()
@@ -156,9 +182,9 @@ fn overrides(cx: &App) -> ThemeOverrides {
     let Some(themes) = cx.try_global::<Themes>() else {
         return ThemeOverrides::default();
     };
-    themes
-        .custom
+    bundled()
         .iter()
+        .chain(&themes.custom)
         .find(|theme| theme.id == themes.selected)
         .map(|theme| theme.overrides.clone())
         .unwrap_or_default()
@@ -166,8 +192,8 @@ fn overrides(cx: &App) -> ThemeOverrides {
 
 /// Every valid theme file directly in `folder`, sorted by name. A file that does not parse keeps
 /// its version in `previous`, if it had one, so a save in progress does not flash the theme away.
-/// An empty file is one being written and is skipped quietly. A file named like a built-in theme
-/// is left out.
+/// An empty file is one being written and is skipped quietly. A file named like a built-in or a
+/// bundled theme is left out.
 fn load(folder: &Path, previous: &[Custom]) -> Vec<Custom> {
     let Ok(entries) = std::fs::read_dir(folder) else {
         return Vec::new();
@@ -180,7 +206,9 @@ fn load(folder: &Path, previous: &[Custom]) -> Vec<Custom> {
         })
         .filter_map(|path| {
             let id = path.file_stem()?.to_str()?.to_owned();
-            if BUILT_IN.into_iter().any(|kind| kind.id() == id) {
+            let taken = BUILT_IN.into_iter().any(|kind| kind.id() == id)
+                || BUNDLED_FILES.iter().any(|(bundled, _)| *bundled == id);
+            if taken {
                 log::warn!("themes: {} has a built-in theme's name", path.display());
                 return None;
             }
@@ -261,6 +289,12 @@ mod tests {
         .unwrap();
         assert_eq!(theme.name, "Nord");
         assert_eq!(theme.overrides.background.as_deref(), Some("#2e3440"));
+    }
+
+    #[test]
+    fn bundled_themes_parse() {
+        let names: Vec<&str> = bundled().iter().map(|theme| theme.name.as_str()).collect();
+        assert_eq!(names, ["Rosé Pine", "Nord", "Dracula"]);
     }
 
     #[test]

@@ -4,18 +4,20 @@
 
 use gpui::Focusable as _;
 use gpui::prelude::*;
+use std::cell::Cell;
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, App, Context, Entity, Global, Hsla, Pixels, ScrollHandle, SharedString, Size, Task,
-    UniformListScrollHandle, Window, WindowHandle, div, px, svg, uniform_list,
+    Animation, AnimationExt as _, AnyElement, App, Context, Entity, Global, Hsla, Pixels,
+    ScrollHandle, SharedString, Size, Task, UniformListScrollHandle, Window, WindowHandle, div, px,
+    svg, uniform_list,
 };
 use tokativ_config::{Backend, Capitals, Config, Periods, PillEdge, Processor};
 use tokativ_engine::{Hardware, ModelId};
 use ui::{
-    ActiveTheme as _, Button, Entrance, Input, Menu, MenuItem, Perch, Picker, Popovers, Radio,
-    Scrollbar, Scroller, Scrubber, ScrubberState, Separator, Switch, TabBar, Text, Tipped as _,
-    Vacancy, eyebrow, veiled,
+    ActiveTheme as _, Button, Entrance, Glide, Input, Menu, MenuItem, Perch, Picker, Popovers,
+    Radio, Scrollbar, Scroller, Scrubber, ScrubberState, Separator, Switch, TabBar, Text,
+    Tipped as _, Vacancy, eyebrow, veiled,
 };
 
 use crate::chrome::{self, veil};
@@ -35,6 +37,16 @@ const HEADER_BLUR: Pixels = px(1.);
 /// How far past the header the rows keep dissolving, so sharp rows never meet the haze at a
 /// hard edge.
 const HEADER_FADE_TAIL: Pixels = px(48.);
+/// How far the theme cards fade out towards a side of the row that has more cards past it.
+const THEMES_FADE: Pixels = px(48.);
+/// The height of a theme card's picture, without its name below.
+const THEME_CARD_HEIGHT: Pixels = px(76.);
+/// The room above and below the row of theme cards.
+const THEME_ROW_PADDING: Pixels = px(12.);
+/// The diameter of the buttons that move the theme cards along.
+const THEME_ARROW: Pixels = px(28.);
+/// How long those buttons take to fade in or out.
+const THEME_ARROW_FADE: std::time::Duration = std::time::Duration::from_millis(160);
 /// How far a clickable row's hover shade reaches past the column on either side.
 const HOVER_REACH: Pixels = px(10.);
 /// How much a query found in a setting's title counts over one found in its detail.
@@ -312,6 +324,12 @@ pub struct Settings {
     results_scrollbar: Entity<Scrollbar>,
     /// Scrolls an opened repository's files and model card.
     files_scrollbar: Entity<Scrollbar>,
+    /// Scrolls the row of theme cards sideways.
+    themes_scroll: ScrollHandle,
+    /// Eases the theme cards to where a wheel step sends them.
+    themes_glide: Glide,
+    /// Whether the back and forward buttons over the theme cards have shown yet.
+    theme_arrows_seen: [Cell<bool>; 2],
     _debounce: Option<Task<()>>,
 }
 
@@ -401,6 +419,13 @@ impl Settings {
             }),
             results_scroll,
             files_scrollbar: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(view)),
+            themes_scroll: ScrollHandle::new(),
+            themes_glide: {
+                let mut glide = Glide::default();
+                glide.watch(view);
+                glide
+            },
+            theme_arrows_seen: Default::default(),
             _debounce: None,
             _listing: {
                 let listing = cx.background_spawn(async { tokativ_engine::hardware() });
@@ -1155,8 +1180,9 @@ impl Settings {
         self.row(Slot::Editor, modes, cx)
     }
 
-    /// Every theme as a card that shows the pill in its colors. The system theme's card is
-    /// split between its light and dark looks.
+    /// Every theme as a card that shows the pill in its colors, in one row that scrolls sideways
+    /// with a touchpad or Shift and the wheel. The system theme's card is split between its light
+    /// and dark looks.
     fn gallery(&self, config: &Config, cx: &mut Context<Self>) -> AnyElement {
         let theme = *cx.theme();
         let cards = themes::swatches(cx).into_iter().map(|swatch| {
@@ -1169,7 +1195,7 @@ impl Settings {
             let inner = crate::nested_radius(radius, px(2.));
             let card = div()
                 .flex()
-                .h(px(76.))
+                .h(THEME_CARD_HEIGHT)
                 .w_full()
                 .rounded(radius)
                 .squircle()
@@ -1198,6 +1224,7 @@ impl Settings {
                 .flex()
                 .flex_col()
                 .gap_1p5()
+                .flex_none()
                 .w(px(132.))
                 .cursor_pointer()
                 .hover(|style| style.opacity(0.85))
@@ -1219,13 +1246,108 @@ impl Settings {
                     this.edit(cx, |config| config.theme = id);
                 }))
         });
-        div()
+        // The row reaches past the column by the width of its fade on either side, and pads its
+        // cards back in by as much, so at rest the fades lie over empty room and a card dims
+        // gradually as it scrolls into one. Before the row is first laid out its width is
+        // unknown, and the cards are taken to run past the right side.
+        let scroll = &self.themes_scroll;
+        self.themes_glide.sync(scroll);
+        let hidden = -scroll.offset().x;
+        let unmeasured = scroll.bounds().size.width <= Pixels::ZERO;
+        let before = hidden > px(0.5);
+        let after = unmeasured || scroll.max_offset().x - hidden > px(0.5);
+        let (glide, wheeled) = (self.themes_glide.clone(), scroll.clone());
+        let row = div()
+            .id("theme-cards")
             .flex()
-            .flex_wrap()
             .gap_3()
-            .py_3()
-            .children(cards)
+            .mx(-THEMES_FADE)
+            .px(THEMES_FADE)
+            .py(THEME_ROW_PADDING)
+            .overflow_x_scroll()
+            .restrict_scroll_to_axis()
+            .track_scroll(scroll)
+            // A touchpad already moves smoothly. A wheel jumps a whole step, which the glide
+            // eases out.
+            .on_scroll_wheel(move |event, window, _| match event.delta.precise() {
+                true => glide.jump(&wheeled, wheeled.offset()),
+                false => glide.nudge(&wheeled, window),
+            })
+            .fade_sides(THEMES_FADE, THEMES_FADE)
+            .children(cards);
+        div()
+            .relative()
+            .child(row)
+            .children(self.theme_arrow(false, before, cx))
+            .children(self.theme_arrow(true, after, cx))
             .into_any_element()
+    }
+
+    /// The round button over one end of the theme cards that glides them most of a view
+    /// further, towards the end it sits on. It fades in while `wanted` and out once not, and
+    /// is left out until it is first wanted, so it does not fade out as the page opens.
+    fn theme_arrow(&self, forward: bool, wanted: bool, cx: &App) -> Option<AnyElement> {
+        let side = forward as usize;
+        let seen = self.theme_arrows_seen[side].get() || wanted;
+        self.theme_arrows_seen[side].set(seen);
+        if !seen {
+            return None;
+        }
+        let theme = cx.theme();
+        let (glide, scroll) = (self.themes_glide.clone(), self.themes_scroll.clone());
+        let (id, icon) = match forward {
+            true => ("theme-cards-forward", "icons/chevron-right.svg"),
+            false => ("theme-cards-back", "icons/chevron-left.svg"),
+        };
+        // Centered on the column's edge, over the inner half of the fade.
+        let inset = -THEME_ARROW / 2.;
+        let hover = theme.muted;
+        let button = div()
+            .id(id)
+            .absolute()
+            .top(THEME_ROW_PADDING + (THEME_CARD_HEIGHT - THEME_ARROW) / 2.)
+            .when(forward, |this| this.right(inset))
+            .when(!forward, |this| this.left(inset))
+            .size(THEME_ARROW)
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .bg(theme.secondary)
+            .border_1()
+            .border_color(theme.border)
+            .shadow_md()
+            .child(
+                svg()
+                    .path(icons::path(icon))
+                    .size(px(14.))
+                    .text_color(theme.foreground),
+            )
+            .when(wanted, |this| {
+                this.cursor_pointer()
+                    .occlude()
+                    .hover(move |style| style.bg(hover))
+                    .on_click(move |_, window, _| {
+                        let step = scroll.bounds().size.width * 0.75;
+                        let goal = glide.goal(&scroll);
+                        let x = match forward {
+                            true => goal.x - step,
+                            false => goal.x + step,
+                        };
+                        glide.aim(&scroll, gpui::point(x, goal.y), window);
+                    })
+            });
+        // A new id on each change starts the fade again.
+        let fade = SharedString::from(format!("{id}-{}", if wanted { "in" } else { "out" }));
+        let element = button.with_animation(
+            fade,
+            Animation::new(THEME_ARROW_FADE).with_easing(ui::ease_out_cubic),
+            move |button, delta| match wanted {
+                true => button.opacity(delta),
+                false => button.opacity(1. - delta),
+            },
+        );
+        Some(element.into_any_element())
     }
 
     fn theme(&self, config: &Config, cx: &mut Context<Self>) -> AnyElement {
@@ -1243,6 +1365,12 @@ impl Settings {
             .into_iter()
             .map(|kind| pick(kind.id().to_owned(), kind.label().to_string(), cx))
             .collect();
+        items.push(MenuItem::separator("themes-bundled"));
+        items.extend(
+            themes::bundled()
+                .iter()
+                .map(|theme| pick(theme.id.clone(), theme.name.clone(), cx)),
+        );
         let custom = themes::custom(cx).to_vec();
         if !custom.is_empty() {
             items.push(MenuItem::separator("themes-custom"));
