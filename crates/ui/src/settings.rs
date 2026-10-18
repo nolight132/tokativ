@@ -616,10 +616,7 @@ impl Settings {
                 "Confirm button",
                 "The check mark on the right. Enter or the hotkey finishes without it.",
             ),
-            Slot::Login => plain(
-                "Launch at login",
-                "Not needed with the Home Manager service.",
-            ),
+            Slot::Login => pair("Launch at login", None),
             Slot::Tray => plain("Tray icon", "Switch models and profiles from the panel."),
             Slot::Unload => plain(
                 "Unload models",
