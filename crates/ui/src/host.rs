@@ -181,6 +181,24 @@ impl Library {
         }
     }
 
+    /// The models being downloaded, and those whose download failed, so the list can show them
+    /// before they are installed.
+    pub fn fetching(&self) -> Vec<ModelId> {
+        let mut ids: Vec<ModelId> = self
+            .downloads
+            .iter()
+            .filter(|(_, state)| {
+                matches!(
+                    state,
+                    ModelState::Downloading { .. } | ModelState::Failed(_)
+                )
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.sort_by_key(|id| id.name().to_lowercase());
+        ids
+    }
+
     pub fn installed(&self, id: &ModelId) -> bool {
         self.installed.iter().any(|model| &model.id == id)
     }

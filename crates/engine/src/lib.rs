@@ -240,7 +240,7 @@ impl Engine for Gguf {
             Ok(device) => Device {
                 name: match device.description.is_empty() {
                     true => device.name,
-                    false => device.description,
+                    false => readable(&device.description),
                 },
                 gpu: matches!(
                     device.device_type,
@@ -252,6 +252,20 @@ impl Engine for Gguf {
                 gpu: false,
             },
         }
+    }
+}
+
+/// A device's description as people name the hardware. Vulkan drivers append their own name and
+/// the chip's codename, as in "AMD Radeon RX 7900 XT (RADV NAVI31)", which says nothing more
+/// to most people and makes the name too long to sit in a line of text.
+pub fn readable(description: &str) -> String {
+    let trimmed = description.trim();
+    match trimmed
+        .strip_suffix(')')
+        .and_then(|rest| rest.rsplit_once(" ("))
+    {
+        Some((name, _)) if !name.trim().is_empty() => name.trim().to_owned(),
+        _ => trimmed.to_owned(),
     }
 }
 
@@ -522,6 +536,23 @@ fn tail(text: &str, limit: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_names_lose_the_driver() {
+        assert_eq!(
+            readable("AMD Radeon RX 7900 XT (RADV NAVI31)"),
+            "AMD Radeon RX 7900 XT"
+        );
+        assert_eq!(
+            readable("Intel(R) Arc(TM) A770 Graphics (DG2)"),
+            "Intel(R) Arc(TM) A770 Graphics"
+        );
+        assert_eq!(
+            readable("NVIDIA GeForce RTX 4090"),
+            "NVIDIA GeForce RTX 4090"
+        );
+        assert_eq!(readable("(llvmpipe)"), "(llvmpipe)");
+    }
 
     #[test]
     fn the_tail_starts_at_a_word() {
