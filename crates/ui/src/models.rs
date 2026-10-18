@@ -320,7 +320,8 @@ pub(crate) fn result_row(repository: &Repository, open: Choose, cx: &App) -> Any
         .into_any_element()
 }
 
-/// A repository's architecture and how often it was downloaded, in one muted line.
+/// A repository's architecture, how often it was downloaded and how many liked it, in one muted
+/// line.
 pub(crate) fn facts(repository: &Repository, cx: &App) -> AnyElement {
     let theme = cx.theme();
     div()
@@ -350,14 +351,31 @@ pub(crate) fn facts(repository: &Repository, cx: &App) -> AnyElement {
                 )
                 .child(count(repository.downloads)),
         )
+        .child("·")
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(
+                    gpui::svg()
+                        .path(icons::path("icons/heart.svg"))
+                        .size(px(12.))
+                        .flex_none()
+                        .text_color(theme.muted_foreground),
+                )
+                .child(count(repository.likes)),
+        )
         .into_any_element()
 }
 
-/// One GGUF file of a repository: its quantization and size, where it stands, and the button
-/// that downloads, cancels or deletes it.
+/// One GGUF file of a repository on one line: its quantization, its size and where it stands,
+/// and the button that downloads, cancels or deletes it. `recommended` marks the file that suits
+/// this setup.
 pub(crate) fn file_row(
     repo: &str,
     file: &RemoteFile,
+    recommended: bool,
     library: &Entity<Library>,
     cx: &App,
 ) -> AnyElement {
@@ -371,7 +389,8 @@ pub(crate) fn file_row(
     let status = match &state {
         ModelState::Missing => chrome::size(file.size),
         ModelState::Downloading { done, total } => format!(
-            "Downloading, {:.0}%",
+            "{}, downloading {:.0}%",
+            chrome::size(file.size),
             *done as f64 / (*total).max(1) as f64 * 100.
         ),
         ModelState::Installed { .. } => format!("{}, installed", chrome::size(file.size)),
@@ -412,33 +431,34 @@ pub(crate) fn file_row(
     };
     div()
         .w_full()
-        .h(LIST_ROW)
         .flex()
         .items_center()
         .gap_3()
         .px(chrome::GROUP_PADDING)
+        .py_1p5()
         .child(
             div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_w_0()
-                .gap_1()
+                .flex_none()
+                .min_w(px(64.))
+                .font_weight(gpui::FontWeight::MEDIUM)
                 .child(
                     file.quantization()
                         .map(str::to_owned)
                         .unwrap_or_else(|| file.name.clone()),
-                )
-                .child(
-                    div()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .text_size(small)
-                        .text_color(theme.muted_foreground)
-                        .child(status),
                 ),
         )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_size(small)
+                .text_color(theme.muted_foreground)
+                .child(status),
+        )
+        .when(recommended, |this| this.child(tag("Recommended", cx)))
         .child(div().flex_none().child(action))
         .into_any_element()
 }

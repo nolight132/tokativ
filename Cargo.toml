@@ -45,6 +45,8 @@ gpui_platform = { git = "https://github.com/sonorahq/gpui", rev = "b5b49cc0dfdfd
 icons = { git = "https://github.com/sonorahq/sonora", rev = "71b58c80" }
 ui = { git = "https://github.com/sonorahq/sonora", rev = "71b58c80" }
 regex = "1.12"
+# Model cards from Hugging Face, drawn in the model search.
+pulldown-cmark = { version = "0.13", default-features = false }
 whatlang = "0.18"
 unicode-segmentation = "1.13"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "query", "rustls"] }
