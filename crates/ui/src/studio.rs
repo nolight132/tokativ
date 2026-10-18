@@ -12,10 +12,10 @@ use std::time::{Duration, Instant};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, Context, CursorStyle, Empty, Entity, MouseButton, MouseDownEvent, Pixels, Point,
-    SpringConfig, Task, Window, canvas, div, point, px, svg,
+    SharedString, SpringConfig, Task, Window, canvas, div, point, px, svg,
 };
 use tokativ_audio::BANDS;
-use tokativ_config::{Pill as PillConfig, PillEdge};
+use tokativ_config::{Bars, Pill as PillConfig, PillEdge};
 use ui::{ActiveTheme as _, Perch, Text, Tipped as _};
 
 use crate::caption;
@@ -48,6 +48,9 @@ const BADGE_HEIGHT: f32 = 18.;
 /// The most the compositor scales the group while it drops onto the monitor or lifts off it;
 /// past this it is laid out at another scale instead.
 const MAX_SHRINK: f32 = 0.8;
+/// The size of each choice in the switch between bar layouts.
+const LAYOUT_WIDTH: f32 = 30.;
+const LAYOUT_HEIGHT: f32 = 22.;
 /// How far each quarter of a stretched box reaches past its middle, so the quarters overlap.
 const SEAM: f32 = 2.;
 /// How wide the strip along each end of the pill is that drags it wider, half of it outside.
@@ -515,6 +518,7 @@ impl Render for Studio {
             .child(caption);
 
         let arrow = self.arrow(&config, rest_pill_top, early, held, cx);
+        let layouts = self.layouts(config.bars, early, cx);
 
         let stage_size = self.stage.clone();
         let stage = div()
@@ -539,7 +543,8 @@ impl Render for Studio {
             .child(measure)
             .child(badge)
             .child(group)
-            .child(arrow);
+            .child(arrow)
+            .child(layouts);
 
         let hint = match held {
             false => {
@@ -942,6 +947,63 @@ impl Studio {
             .h(height)
             .when(shown < 1., |this| this.child(outline))
             .when(unfolded > 0.001, |this| this.child(bubble))
+            .into_any_element()
+    }
+
+    /// The switch in the stage's corner between the ways the bars are laid out, each drawn as a
+    /// few bars in its shape.
+    fn layouts(&self, chosen: Bars, resting: f32, cx: &mut Context<Self>) -> AnyElement {
+        let theme = *cx.theme();
+        let options = Bars::ALL.map(|layout| {
+            let picked = layout == chosen;
+            let shape = match layout {
+                Bars::Spectrum => [0.6, 1., 0.7, 0.45, 0.25],
+                Bars::Mirrored => [0.35, 0.85, 0.5, 0.85, 0.35],
+                Bars::Peak => [0.25, 0.55, 1., 0.55, 0.25],
+            };
+            let ink = match picked {
+                true => theme.foreground,
+                false => theme.muted_foreground,
+            };
+            div()
+                .id(SharedString::from(format!("studio-layout-{layout:?}")))
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(px(2.))
+                .w(px(LAYOUT_WIDTH))
+                .h(px(LAYOUT_HEIGHT))
+                .rounded(theme.radius)
+                .when(picked, |this| this.bg(theme.background))
+                .children(shape.map(|level: f32| {
+                    div()
+                        .w(px(2.))
+                        .h(px((LAYOUT_HEIGHT - 8.) * level).max(px(2.)))
+                        .rounded_full()
+                        .bg(ink)
+                }))
+                .when(resting == 1., |this| {
+                    this.cursor_pointer()
+                        .tip_label(layout.name(), Perch::Pointer)
+                        .when(!picked, |this| {
+                            this.hover(|style| style.bg(theme.secondary_hover))
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.edit(cx, |pill| pill.bars = layout)
+                        }))
+                })
+        });
+        div()
+            .absolute()
+            .top_3()
+            .left_3()
+            .flex()
+            .gap(px(2.))
+            .p(px(2.))
+            .rounded(theme.radius * 1.5)
+            .bg(theme.secondary.opacity(0.8))
+            .opacity(resting)
+            .children(options)
             .into_any_element()
     }
 
