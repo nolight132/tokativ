@@ -137,8 +137,8 @@ pub struct Config {
     /// Check stable releases on Windows and macOS; package managers own updates on Linux.
     pub check_for_updates: bool,
     /// The keys that start and confirm a session on macOS and Windows, which Tokativ registers
-    /// itself, such as `alt+space`. On Linux the compositor binds a key to `tokativ toggle`
-    /// instead and this is unused.
+    /// itself, such as `alt+space`. On Linux the compositor binds a key to `tokativ press` or
+    /// `tokativ hold` instead and this is unused.
     pub hotkey: String,
     /// Show a draft of the phrase being spoken at the cursor before it is final. Needs the input
     /// method.

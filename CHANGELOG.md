@@ -7,6 +7,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Push to talk. Hold the dictation key while you talk and let go to finish, or tap it to start
+  and tap again to finish as before. It works on macOS, Windows, Hyprland, Sway, river and niri.
+  Setup shows the new bindings, which run `tokativ press` and `tokativ release`, or
+  `tokativ hold` on niri, which cannot run a command when a key comes up.
+
+### Fixed
+
+- The niri and Sway bindings from setup no longer start and finish dictation over and over
+  while the key is held.
+
 ## [0.4.0] - 2026-10-18
 
 ### Added

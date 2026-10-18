@@ -15,6 +15,15 @@ use interprocess::local_socket::traits::ListenerExt as _;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     Toggle,
+    /// The dictation key went down. It toggles like [`Command::Toggle`], and a session it starts
+    /// finishes on [`Command::Release`] if the key was held.
+    Press,
+    /// The dictation key came up.
+    Release,
+    /// The dictation key is down, sent again on every key repeat, for compositors that cannot
+    /// run a command on release. The first works as [`Command::Press`], and a session it started
+    /// finishes once the repeats stop.
+    Hold,
     Start,
     Stop,
     Confirm,
@@ -38,6 +47,9 @@ impl Command {
         let mut words = line.split_whitespace();
         let command = match (words.next(), words.next()) {
             (Some("toggle"), None) => Self::Toggle,
+            (Some("press"), None) => Self::Press,
+            (Some("release"), None) => Self::Release,
+            (Some("hold"), None) => Self::Hold,
             (Some("start"), None) => Self::Start,
             (Some("stop"), None) => Self::Stop,
             (Some("confirm"), None) => Self::Confirm,
@@ -57,6 +69,9 @@ impl Command {
     pub fn line(&self) -> String {
         match self {
             Self::Toggle => "toggle".into(),
+            Self::Press => "press".into(),
+            Self::Release => "release".into(),
+            Self::Hold => "hold".into(),
             Self::Start => "start".into(),
             Self::Stop => "stop".into(),
             Self::Confirm => "confirm".into(),
@@ -206,6 +221,9 @@ mod tests {
     fn commands_round_trip() {
         for command in [
             Command::Toggle,
+            Command::Press,
+            Command::Release,
+            Command::Hold,
             Command::Start,
             Command::Stop,
             Command::Confirm,

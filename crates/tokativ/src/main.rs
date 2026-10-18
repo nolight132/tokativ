@@ -53,6 +53,12 @@ enum Verb {
     },
     /// Start dictating, or confirm the running session
     Toggle,
+    /// Bind to a key press: toggles, and pairs with `release` so holding the key works as push to talk
+    Press,
+    /// Bind to the release of the key bound to `press`
+    Release,
+    /// Bind to a key that repeats while held, where the compositor cannot run a command on release
+    Hold,
     /// Start dictating
     Start,
     /// Stop dictating and insert what is left
@@ -116,6 +122,9 @@ fn command(verb: Verb) -> Command {
             unreachable!("handled in main")
         }
         Verb::Toggle => Command::Toggle,
+        Verb::Press => Command::Press,
+        Verb::Release => Command::Release,
+        Verb::Hold => Command::Hold,
         Verb::Start => Command::Start,
         Verb::Stop => Command::Stop,
         Verb::Confirm => Command::Confirm,
@@ -197,7 +206,11 @@ fn send(command: Command) -> Result<()> {
         Err(error) if absent(&error) => {
             if !matches!(
                 command,
-                Command::Toggle | Command::Start | Command::Settings
+                Command::Toggle
+                    | Command::Press
+                    | Command::Hold
+                    | Command::Start
+                    | Command::Settings
             ) {
                 bail!("the daemon is not running");
             }

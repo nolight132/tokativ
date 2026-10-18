@@ -85,14 +85,16 @@ impl Desktop {
     pub fn directions(self) -> &'static str {
         match self {
             Self::Niri => {
-                "Add these lines to the binds section of your niri config. niri picks the change up on save."
+                "Add this line to the binds section of your niri config. niri picks the change up on save. Tap the key to start and finish dictating, or hold it while you talk."
             }
             Self::Hyprland => {
-                "Add these lines to your Hyprland config. Hyprland reloads it on save."
+                "Add these lines to your Hyprland config. Hyprland reloads it on save. Tap the key to start and finish dictating, or hold it while you talk."
             }
-            Self::Sway => "Add these lines to your Sway config, then reload Sway with Mod+Shift+C.",
+            Self::Sway => {
+                "Add these lines to your Sway config, then reload Sway with Mod+Shift+C. Tap the key to start and finish dictating, or hold it while you talk."
+            }
             Self::River => {
-                "Add these lines to your river init script and run them once, or restart river."
+                "Add these lines to your river init script and run them once, or restart river. Tap the key to start and finish dictating, or hold it while you talk."
             }
             Self::Plasma => {
                 "Open System Settings, then Keyboard, Shortcuts, Add New, Command or Script. Use this command and pick a key."
@@ -104,18 +106,27 @@ impl Desktop {
         }
     }
 
-    /// The text to add, in the config's own syntax.
+    /// The text to add, in the config's own syntax. Where the compositor runs a command when a key
+    /// comes up, the key is bound twice so holding it works as push to talk. niri cannot, so its
+    /// binding repeats while held and the repeats stand in for the key being down.
     pub fn snippet(self) -> &'static str {
         match self {
-            Self::Niri => "Mod+D { spawn \"tokativ\" \"toggle\"; }",
-            Self::Hyprland => "bind = SUPER, D, exec, tokativ toggle",
-            Self::Sway => "bindsym $mod+d exec tokativ toggle",
-            Self::River => "riverctl map normal Super D spawn 'tokativ toggle'",
+            Self::Niri => "Mod+D cooldown-ms=100 { spawn \"tokativ\" \"hold\"; }",
+            Self::Hyprland => {
+                "bind = SUPER, D, exec, tokativ press\nbindr = SUPER, D, exec, tokativ release"
+            }
+            Self::Sway => {
+                "bindsym --no-repeat $mod+d exec tokativ press\nbindsym --release $mod+d exec tokativ release"
+            }
+            Self::River => {
+                "riverctl map normal Super D spawn 'tokativ press'\nriverctl map -release normal Super D spawn 'tokativ release'"
+            }
             Self::Plasma | Self::Gnome | Self::Unknown => "tokativ toggle",
         }
     }
 
-    /// Looks through the desktop's config files for a line that runs `tokativ toggle`.
+    /// Looks through the desktop's config files for a line that starts dictation: `tokativ toggle`,
+    /// `press` or `hold`.
     pub fn bound(self) -> Option<Bound> {
         let file = self.config_file()?;
         let folder = file.parent()?.to_path_buf();
@@ -134,7 +145,7 @@ impl Desktop {
             let text = fs::read_to_string(&file).ok()?;
             let line = text.lines().find(|line| {
                 let line = line.trim_start();
-                !line.starts_with("//") && !line.starts_with('#') && runs_toggle(line)
+                !line.starts_with("//") && !line.starts_with('#') && starts_dictation(line)
             })?;
             Some(Bound {
                 keys: keys(self, line)?,
@@ -144,8 +155,11 @@ impl Desktop {
     }
 }
 
-fn runs_toggle(line: &str) -> bool {
-    line.contains("tokativ") && line.contains("toggle")
+fn starts_dictation(line: &str) -> bool {
+    line.contains("tokativ")
+        && ["toggle", "press", "hold"]
+            .iter()
+            .any(|verb| line.contains(verb))
 }
 
 /// The key combination at the start of a binding line, in each config's syntax.
@@ -153,7 +167,11 @@ fn keys(desktop: Desktop, line: &str) -> Option<String> {
     let line = line.trim();
     match desktop {
         Desktop::Niri => line.split_whitespace().next().map(str::to_owned),
-        Desktop::Sway => line.split_whitespace().nth(1).map(str::to_owned),
+        Desktop::Sway => line
+            .split_whitespace()
+            .skip(1)
+            .find(|word| !word.starts_with("--"))
+            .map(str::to_owned),
         Desktop::Hyprland => {
             let (_, rest) = line.split_once('=')?;
             let mut fields = rest.split(',').map(str::trim);
@@ -167,7 +185,10 @@ fn keys(desktop: Desktop, line: &str) -> Option<String> {
         Desktop::River => {
             let words: Vec<&str> = line.split_whitespace().collect();
             let at = words.iter().position(|word| *word == "map")?;
-            Some(format!("{}+{}", words.get(at + 2)?, words.get(at + 3)?))
+            // Flags such as -release come before the mode, which comes before the keys.
+            let mut rest = words[at + 1..].iter().filter(|word| !word.starts_with('-'));
+            rest.next()?;
+            Some(format!("{}+{}", rest.next()?, rest.next()?))
         }
         Desktop::Plasma | Desktop::Gnome | Desktop::Unknown => None,
     }
@@ -217,5 +238,24 @@ mod tests {
             .as_deref(),
             Some("Super+D")
         );
+    }
+
+    #[test]
+    fn snippets_are_found_by_their_first_line() {
+        for (desktop, expected) in [
+            (Desktop::Niri, "Mod+D"),
+            (Desktop::Hyprland, "SUPER + D"),
+            (Desktop::Sway, "$mod+d"),
+            (Desktop::River, "Super+D"),
+        ] {
+            let mut lines = desktop.snippet().lines();
+            let first = lines.next().unwrap();
+            assert!(starts_dictation(first), "{first}");
+            assert_eq!(keys(desktop, first).as_deref(), Some(expected));
+            for line in lines {
+                assert!(!starts_dictation(line), "{line}");
+                assert_eq!(keys(desktop, line).as_deref(), Some(expected));
+            }
+        }
     }
 }

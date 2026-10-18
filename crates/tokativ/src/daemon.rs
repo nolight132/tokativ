@@ -1,7 +1,7 @@
 //! The background process: it owns the GPUI app, answers the control socket and the tray, and
 //! runs one dictation session at a time.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use futures::StreamExt as _;
@@ -27,6 +27,15 @@ const PLACEHOLDER: &str = "…";
 const DRAFT_EVERY: Duration = Duration::from_millis(600);
 /// How often the daemon looks whether a model finished loading on some device.
 const DEVICE_POLL: Duration = Duration::from_secs(2);
+/// How long the dictation key has to stay down for letting go of it to finish the session it
+/// started. A shorter press is a tap, which leaves the session running until the next one.
+const HOLD: Duration = Duration::from_millis(400);
+/// How long after a press the first key repeat of a held key can arrive. It covers the repeat
+/// delay compositors default to, which is 600 ms in niri.
+const FIRST_REPEAT: Duration = Duration::from_secs(1);
+/// How long without a key repeat means the held key was let go. It fits a binding that repeats
+/// at least four times a second.
+const REPEAT_GAP: Duration = Duration::from_millis(300);
 
 /// Everything that reaches the daemon from another thread.
 enum Event {
@@ -62,6 +71,17 @@ impl Placed {
     fn fits(&self, output: &Option<String>, config: &Config) -> bool {
         &self.output == output && self.pill == config.pill
     }
+}
+
+/// The dictation key since its last press, until it is let go. Holding the key past [`HOLD`]
+/// makes it push to talk, so letting go finishes the session that press started.
+struct Held {
+    /// The session the press started. `None` when the press confirmed or restarted one instead,
+    /// which letting go leaves alone.
+    session: Option<u64>,
+    pressed: Instant,
+    /// The last key repeat, for bindings that report the key held by repeating.
+    repeated: Option<Instant>,
 }
 
 /// One press of the hotkey to the pill closing.
@@ -129,6 +149,8 @@ pub struct Daemon {
     inserter: Option<Inserter>,
     session: Option<Session>,
     next_session: u64,
+    /// The dictation key, from a press until it is let go.
+    held: Option<Held>,
     /// The pill window, kept while it is on screen so a new session can unfold it again
     /// instead of opening another.
     pill: Option<Placed>,
@@ -246,6 +268,7 @@ impl Daemon {
                 inserter,
                 session: None,
                 next_session: 0,
+                held: None,
                 pill: None,
                 caption: None,
                 tray: None,
@@ -351,6 +374,9 @@ impl Daemon {
         log::debug!("command: {command:?}");
         match command {
             Command::Toggle => self.toggle(cx),
+            Command::Press => self.press(cx),
+            Command::Release => self.release(cx),
+            Command::Hold => self.repeat(cx),
             Command::Start => self.start(cx),
             Command::Stop | Command::Confirm => self.confirm(cx),
             Command::Cancel => self.cancel(cx),
@@ -398,6 +424,73 @@ impl Daemon {
                     set_phase(pill, phase, cx);
                 }
             }
+        }
+    }
+
+    /// The dictation key went down. It toggles, and remembers the session it started so letting
+    /// go of a held key can finish it.
+    fn press(&mut self, cx: &mut Context<Self>) {
+        let idle = self.session.is_none();
+        self.toggle(cx);
+        let started = self
+            .session
+            .as_ref()
+            .filter(|_| idle)
+            .map(|session| session.id);
+        self.held = Some(Held {
+            session: started,
+            pressed: Instant::now(),
+            repeated: None,
+        });
+    }
+
+    /// The dictation key came up. A session it started finishes if the key was held long enough
+    /// to be push to talk. After a tap the session keeps listening.
+    fn release(&mut self, cx: &mut Context<Self>) {
+        if let Some(held) = self.held.take()
+            && held.pressed.elapsed() >= HOLD
+        {
+            self.let_go(held, cx);
+        }
+    }
+
+    /// A key repeat of a binding that repeats while held. Repeats keep the key down, and a
+    /// timer lets go of it once they stop. A repeat too late to belong to the last press is a
+    /// new press.
+    fn repeat(&mut self, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        let Some(held) = self.held.as_mut().filter(|held| match held.repeated {
+            None => now - held.pressed < FIRST_REPEAT,
+            Some(last) => now - last < REPEAT_GAP,
+        }) else {
+            self.press(cx);
+            return;
+        };
+        held.repeated = Some(now);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(REPEAT_GAP).await;
+            this.update(cx, |this, cx| {
+                let quiet = this
+                    .held
+                    .as_ref()
+                    .is_some_and(|held| held.repeated == Some(now));
+                if quiet && let Some(held) = this.held.take() {
+                    this.let_go(held, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Finishes the session a held key started, unless it already ended or is finishing.
+    fn let_go(&mut self, held: Held, cx: &mut Context<Self>) {
+        let listening = self
+            .session
+            .as_ref()
+            .is_some_and(|session| Some(session.id) == held.session && !session.stopping);
+        if listening {
+            self.confirm(cx);
         }
     }
 
@@ -1057,7 +1150,8 @@ fn start_hotkeys(config: &Config, events: &UnboundedSender<Event>) -> Option<Hot
     let events = events.clone();
     Hotkeys::new(&config.hotkey, move |pressed| {
         let event = match pressed {
-            Pressed::Toggle => Event::Command(Command::Toggle),
+            Pressed::Down => Event::Command(Command::Press),
+            Pressed::Up => Event::Command(Command::Release),
             Pressed::Key(key) => Event::Key(key),
         };
         events.unbounded_send(event).ok();

@@ -515,7 +515,7 @@ impl Setup {
             )
             .child(intro(
                 format!(
-                    "Tokativ listens for this key in every app. Click it to record another.{permission}"
+                    "Tokativ listens for this key in every app. Tap it to start and finish dictating, or hold it while you talk. Click it to record another.{permission}"
                 ),
                 cx,
             ))
