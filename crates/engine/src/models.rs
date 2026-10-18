@@ -488,19 +488,40 @@ fn files(client: &reqwest::blocking::Client, repo: &str) -> Result<Vec<RemoteFil
 }
 
 /// A repository's model card, its README in Markdown, or nothing when it has none. Blocks.
+/// The card is kept on disk for [`cached_card`], and a failure to keep it is only logged.
 pub fn model_card(repo: &str) -> Result<String> {
     let response = client()?
         .get(format!("{HUB}/{repo}/raw/main/README.md"))
         .send()
         .with_context(|| format!("fetching the card of {repo}"))?;
-    if response.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(String::new());
+    let card = match response.status() == reqwest::StatusCode::NOT_FOUND {
+        true => String::new(),
+        false => response
+            .error_for_status()
+            .with_context(|| format!("fetching the card of {repo}"))?
+            .text()
+            .with_context(|| format!("reading the card of {repo}"))?,
+    };
+    let path = card_path(repo);
+    let kept = path
+        .parent()
+        .map_or(Ok(()), fs::create_dir_all)
+        .and_then(|()| fs::write(&path, &card));
+    if let Err(error) = kept {
+        log::warn!("models: cannot keep the card of {repo}: {error}");
     }
-    response
-        .error_for_status()
-        .with_context(|| format!("fetching the card of {repo}"))?
-        .text()
-        .with_context(|| format!("reading the card of {repo}"))
+    Ok(card)
+}
+
+/// The card [`model_card`] fetched for `repo` before, read from disk without the network.
+pub fn cached_card(repo: &str) -> Option<String> {
+    fs::read_to_string(card_path(repo)).ok()
+}
+
+fn card_path(repo: &str) -> PathBuf {
+    tokativ_config::cache_dir()
+        .join("cards")
+        .join(format!("{}.md", repo.replace('/', "--")))
 }
 
 /// The file of a repository to recommend for this setup: full precision on a graphics card,

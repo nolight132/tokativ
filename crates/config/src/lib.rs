@@ -523,6 +523,16 @@ pub fn config_path() -> PathBuf {
     config_dir().join("config.toml")
 }
 
+/// Where the app keeps what it can fetch again, such as model cards.
+pub fn cache_dir() -> PathBuf {
+    if let Some(sandbox) = sandbox() {
+        return sandbox.join("cache");
+    }
+    dirs::cache_dir()
+        .unwrap_or_else(|| home().join(".cache"))
+        .join(APP_ID)
+}
+
 /// Where downloaded models live, one folder per engine.
 pub fn models_dir() -> PathBuf {
     if let Some(sandbox) = sandbox() {

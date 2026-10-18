@@ -373,18 +373,44 @@ impl Library {
         .detach();
     }
 
-    /// Fetches the model cards of `repos` that were never asked for, so their rows can show the
-    /// card's first paragraph. It notifies only when a card arrives, so a render may call it.
+    /// Gets the model cards of `repos` that were never asked for, so their rows can show the
+    /// card's first paragraph: at once from the cache on disk, or else from the hub. It notifies
+    /// only when a card arrives from the hub, so a render may call it.
     pub fn describe<'a>(
         &mut self,
         repos: impl IntoIterator<Item = &'a str>,
         cx: &mut Context<Self>,
     ) {
         for repo in repos {
-            if !self.search.cards.contains_key(repo) {
-                self.load_card(repo.to_owned(), cx);
+            if self.search.cards.contains_key(repo) {
+                continue;
+            }
+            match models::cached_card(repo) {
+                Some(card) => {
+                    let blocks = std::sync::Arc::new(crate::markdown::parse(&card));
+                    self.search
+                        .cards
+                        .insert(repo.to_owned(), Card::Loaded(blocks));
+                }
+                None => self.load_card(repo.to_owned(), cx),
             }
         }
+    }
+
+    /// Gets the cards of the installed models and the suggested ones ahead of time, so their
+    /// descriptions are there when a list first shows them.
+    pub fn describe_known(&mut self, cx: &mut Context<Self>) {
+        let installed: Vec<String> = self
+            .installed
+            .iter()
+            .map(|model| model.id.repo.clone())
+            .collect();
+        let suggested = models::SUGGESTED
+            .iter()
+            .filter_map(|suggested| ModelId::parse(suggested.id))
+            .map(|id| id.repo);
+        let repos: Vec<String> = installed.into_iter().chain(suggested).collect();
+        self.describe(repos.iter().map(String::as_str), cx);
     }
 
     /// The first paragraph of `repo`'s model card, once the card is in.
@@ -427,7 +453,11 @@ impl Default for Library {
 pub fn entities(config: Config, cx: &mut App) -> (Entity<Store>, Entity<Library>, Entity<Status>) {
     (
         cx.new(|_| Store::new(config)),
-        cx.new(|_| Library::new()),
+        cx.new(|cx| {
+            let mut library = Library::new();
+            library.describe_known(cx);
+            library
+        }),
         cx.new(|_| Status::default()),
     )
 }
