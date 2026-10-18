@@ -205,6 +205,16 @@ pub fn size(bytes: u64) -> String {
     }
 }
 
+/// Memory the way the hardware is sold: whole gigabytes of 2³⁰ bytes, so a card with 20 GiB
+/// reads 20 GB rather than 21.5.
+pub fn memory(bytes: u64) -> String {
+    let gibibytes = bytes as f64 / (1u64 << 30) as f64;
+    match gibibytes >= 1. {
+        true => format!("{gibibytes:.0} GB"),
+        false => format!("{:.0} MB", bytes as f64 / (1u64 << 20) as f64),
+    }
+}
+
 /// How many strips the header blur fades in through. Each is one quad, so more of them only
 /// make the crossfade smoother.
 const STRIPS: usize = 64;

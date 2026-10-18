@@ -48,7 +48,7 @@ enum Verb {
         #[arg(long)]
         with_models: bool,
         /// Open the first-run setup on this step
-        #[arg(long, value_parser = ["models", "microphone", "try", "hotkey"])]
+        #[arg(long, value_parser = ["device", "models", "microphone", "try", "hotkey"])]
         step: Option<String>,
     },
     /// Start dictating, or confirm the running session

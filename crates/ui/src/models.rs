@@ -17,8 +17,12 @@ pub(crate) struct Described {
     pub name: String,
     pub maker: Option<String>,
     pub summary: Option<String>,
-    /// The recommendation shown beside the name, such as "Recommended for GPU".
-    pub recommended: Option<&'static str>,
+    /// Whether the setup recommends it for the device chosen.
+    pub recommended: bool,
+    /// The download's size, when it is known before downloading.
+    pub bytes: Option<u64>,
+    /// A caution, such as that the model may not fit in the device's memory.
+    pub warning: Option<String>,
 }
 
 impl Described {
@@ -30,38 +34,46 @@ impl Described {
                 name: suggested.name.to_owned(),
                 maker: Some(suggested.maker.to_owned()),
                 summary: Some(suggested.summary.to_owned()),
-                recommended: suggested.recommended,
+                recommended: false,
+                bytes: (suggested.bytes > 0).then_some(suggested.bytes),
+                warning: None,
                 id,
             },
             None => Self {
                 name: id.name(),
                 maker: None,
                 summary: Some(id.repo.clone()),
-                recommended: None,
+                recommended: false,
+                bytes: None,
+                warning: None,
                 id,
             },
         }
     }
 }
 
-/// The models to list before any search. With `offer` on, as in the setup, only the recommended
-/// models are listed, with their recommendations. With it off the installed models are, without
-/// recommendations. `also` adds models either way, such as the one chosen.
-pub(crate) fn listed(library: &Library, also: &[ModelId], offer: bool) -> Vec<Described> {
-    let mut ids: Vec<ModelId> = match offer {
-        true => models::SUGGESTED
-            .iter()
-            .filter(|suggested| suggested.recommended.is_some())
-            .filter_map(|suggested| ModelId::parse(suggested.id))
-            .collect(),
-        false => Vec::new(),
-    };
-    let installed = library
-        .installed_models()
-        .iter()
-        .map(|model| &model.id)
-        .filter(|_| !offer);
-    for id in installed.chain(also) {
+/// The models the settings list before any search: the installed ones, the ones downloading,
+/// and `also`, such as the one chosen.
+pub(crate) fn listed(library: &Library, also: &[ModelId]) -> Vec<Described> {
+    let fetching = library.fetching();
+    let mut ids: Vec<ModelId> = Vec::new();
+    let installed = library.installed_models().iter().map(|model| &model.id);
+    for id in installed.chain(&fetching).chain(also) {
+        if !ids.contains(id) {
+            ids.push(id.clone());
+        }
+    }
+    ids.into_iter().map(Described::of).collect()
+}
+
+/// The models the setup offers for a graphics card or the processor, the recommended one first,
+/// then `also`, such as one chosen before. `memory` is the device's, in bytes, or zero when it
+/// is unknown, and a model that may not fit in it says so.
+pub(crate) fn offered(gpu: bool, memory: u64, also: &[ModelId]) -> Vec<Described> {
+    let mut ids: Vec<ModelId> = models::offered(gpu)
+        .filter_map(|suggested| ModelId::parse(suggested.id))
+        .collect();
+    for id in also {
         if !ids.contains(id) {
             ids.push(id.clone());
         }
@@ -69,8 +81,19 @@ pub(crate) fn listed(library: &Library, also: &[ModelId], offer: bool) -> Vec<De
     ids.into_iter()
         .map(|id| {
             let mut described = Described::of(id);
-            if !offer {
-                described.recommended = None;
+            described.recommended = models::suggested(&described.id)
+                .is_some_and(|suggested| suggested.offer(gpu) == models::Offer::Recommended);
+            // The weights take about the file's size, and the model needs some room to work.
+            let needed = described.bytes.map_or(0, |bytes| bytes + bytes / 3);
+            if memory > 0 && needed > memory {
+                described.warning = Some(format!(
+                    "May not fit in {} of {}.",
+                    chrome::memory(memory),
+                    match gpu {
+                        true => "video memory",
+                        false => "memory",
+                    }
+                ));
             }
             described
         })
@@ -93,7 +116,10 @@ pub(crate) fn model_row(
     let theme = cx.theme();
     let state = library.read(cx).state(&model.id);
     let (status, progress) = match &state {
-        ModelState::Missing => ("Not downloaded".to_string(), None),
+        ModelState::Missing => match model.bytes {
+            Some(bytes) => (format!("{} download", chrome::size(bytes)), None),
+            None => ("Not downloaded".to_string(), None),
+        },
         ModelState::Downloading { done, total } => {
             let total = (*total).max(1);
             (
@@ -181,7 +207,7 @@ pub(crate) fn model_row(
                                     .child(maker),
                             )
                         })
-                        .when_some(model.recommended, |this, text| this.child(tag(text, cx))),
+                        .when(model.recommended, |this| this.child(tag("Recommended", cx))),
                 )
                 .when_some(model.summary, |this, summary| {
                     this.child(
@@ -189,6 +215,14 @@ pub(crate) fn model_row(
                             .text_size(small)
                             .text_color(theme.muted_foreground)
                             .child(summary),
+                    )
+                })
+                .when_some(model.warning, |this, warning| {
+                    this.child(
+                        div()
+                            .text_size(small)
+                            .text_color(theme.foreground.opacity(0.85))
+                            .child(warning),
                     )
                 })
                 .when_some(progress, |this, progress| {
@@ -206,7 +240,7 @@ pub(crate) fn model_row(
 }
 
 /// A small label beside a model's name.
-fn tag(text: &'static str, cx: &App) -> impl IntoElement {
+pub(crate) fn tag(text: &'static str, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
     div()
         .px_1p5()

@@ -240,7 +240,7 @@ impl Engine for Gguf {
             Ok(device) => Device {
                 name: match device.description.is_empty() {
                     true => device.name,
-                    false => device.description,
+                    false => readable(&device.description),
                 },
                 gpu: matches!(
                     device.device_type,
@@ -252,6 +252,57 @@ impl Engine for Gguf {
                 gpu: false,
             },
         }
+    }
+}
+
+/// Somewhere a model can run, for the setup to offer before any model is loaded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hardware {
+    pub name: String,
+    /// A graphics card, whose own memory holds the weights.
+    pub gpu: bool,
+    /// The device's own memory for a graphics card, the computer's for the processor, in bytes.
+    /// Zero when the device does not say.
+    pub memory: u64,
+}
+
+/// The graphics cards Vulkan or Metal reaches, the one with the most memory first, then the
+/// processor.
+pub fn hardware() -> Vec<Hardware> {
+    let mut found: Vec<Hardware> = transcribe_cpp::devices()
+        .into_iter()
+        .filter_map(|device| {
+            let gpu = match device.device_type {
+                transcribe_cpp::DeviceType::Gpu | transcribe_cpp::DeviceType::Igpu => true,
+                transcribe_cpp::DeviceType::Cpu => false,
+                _ => return None,
+            };
+            let name = match device.description.is_empty() {
+                true => device.name,
+                false => readable(&device.description),
+            };
+            Some(Hardware {
+                name,
+                gpu,
+                memory: device.memory_total,
+            })
+        })
+        .collect();
+    found.sort_by_key(|hardware| (!hardware.gpu, std::cmp::Reverse(hardware.memory)));
+    found
+}
+
+/// A device's description as people name the hardware. Vulkan drivers append their own name and
+/// the chip's codename, as in "AMD Radeon RX 7900 XT (RADV NAVI31)", which says nothing more
+/// to most people and makes the name too long to sit in a line of text.
+pub fn readable(description: &str) -> String {
+    let trimmed = description.trim();
+    match trimmed
+        .strip_suffix(')')
+        .and_then(|rest| rest.rsplit_once(" ("))
+    {
+        Some((name, _)) if !name.trim().is_empty() => name.trim().to_owned(),
+        _ => trimmed.to_owned(),
     }
 }
 
@@ -522,6 +573,31 @@ fn tail(text: &str, limit: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "lists this machine's devices"]
+    fn lists_hardware() {
+        for hardware in hardware() {
+            println!("{hardware:?}");
+        }
+    }
+
+    #[test]
+    fn device_names_lose_the_driver() {
+        assert_eq!(
+            readable("AMD Radeon RX 7900 XT (RADV NAVI31)"),
+            "AMD Radeon RX 7900 XT"
+        );
+        assert_eq!(
+            readable("Intel(R) Arc(TM) A770 Graphics (DG2)"),
+            "Intel(R) Arc(TM) A770 Graphics"
+        );
+        assert_eq!(
+            readable("NVIDIA GeForce RTX 4090"),
+            "NVIDIA GeForce RTX 4090"
+        );
+        assert_eq!(readable("(llvmpipe)"), "(llvmpipe)");
+    }
 
     #[test]
     fn the_tail_starts_at_a_word() {
