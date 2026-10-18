@@ -11,10 +11,11 @@ use gpui::{
     UniformListScrollHandle, Window, WindowHandle, div, px, svg, uniform_list,
 };
 use tokativ_config::{Backend, Capitals, Config, Periods, PillEdge, Processor};
-use tokativ_engine::ModelId;
+use tokativ_engine::{Hardware, ModelId};
 use ui::{
-    ActiveTheme as _, Button, Entrance, Input, Menu, MenuItem, Picker, Popovers, Radio, Scrollbar,
-    Scroller, Scrubber, ScrubberState, Separator, Switch, TabBar, Text, Vacancy, eyebrow, veiled,
+    ActiveTheme as _, Button, Entrance, Input, Menu, MenuItem, Perch, Picker, Popovers, Radio,
+    Scrollbar, Scroller, Scrubber, ScrubberState, Separator, Switch, TabBar, Text, Tipped as _,
+    Vacancy, eyebrow, veiled,
 };
 
 use crate::chrome::{self, veil};
@@ -190,9 +191,8 @@ enum Slot {
     Unload,
     AutoUpdates,
     Updates,
-    Memory,
-    GraphicsMemory,
-    Processor,
+    /// What the app and its model take, as a row of readings.
+    Resources,
     Version,
 }
 
@@ -225,7 +225,11 @@ pub struct Settings {
     scrollbar: Entity<Scrollbar>,
     device_scrollbar: Entity<Scrollbar>,
     usage: Usage,
+    /// The graphics cards and the processor with their memory, once listed, so the readings
+    /// can show how much of it is taken.
+    hardware: Option<Vec<Hardware>>,
     _sampling: Task<()>,
+    _listing: Task<()>,
     /// The field over the column that searches the settings themselves.
     search: Entity<Input>,
     /// The settings search's text, trimmed. Empty means the column shows one category.
@@ -321,6 +325,7 @@ impl Settings {
             scrollbar: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(view)),
             device_scrollbar: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(view)),
             usage: Usage::default(),
+            hardware: None,
             search,
             query: String::new(),
             model_search,
@@ -346,6 +351,17 @@ impl Settings {
             }),
             files_scroll,
             _debounce: None,
+            _listing: {
+                let listing = cx.background_spawn(async { tokativ_engine::hardware() });
+                cx.spawn(async move |this, cx| {
+                    let hardware = listing.await;
+                    this.update(cx, |this, cx| {
+                        this.hardware = Some(hardware);
+                        cx.notify();
+                    })
+                    .ok();
+                })
+            },
             _sampling: cx.spawn(async move |this, cx| {
                 let mut sampler = Sampler::default();
                 loop {
@@ -443,13 +459,7 @@ impl Settings {
     }
 
     /// The slots of one category, group labels included.
-    fn page_slots(&self, page: Page, cx: &App) -> Vec<Slot> {
-        let on_gpu = self
-            .status
-            .read(cx)
-            .device
-            .as_ref()
-            .is_some_and(|device| device.gpu);
+    fn page_slots(&self, page: Page, _cx: &App) -> Vec<Slot> {
         match page {
             Page::Model => vec![
                 Slot::Models,
@@ -501,9 +511,12 @@ impl Settings {
                     .into_iter()
                     .filter(|_| cfg!(not(target_os = "linux"))),
             )
-            .chain([Slot::Title("Resources"), Slot::Memory])
-            .chain(on_gpu.then_some(Slot::GraphicsMemory))
-            .chain([Slot::Processor, Slot::Title("About"), Slot::Version])
+            .chain([
+                Slot::Title("Resources"),
+                Slot::Resources,
+                Slot::Title("About"),
+                Slot::Version,
+            ])
             .collect(),
         }
     }
@@ -627,18 +640,10 @@ impl Settings {
                 "Looks for a new release now and then.",
             ),
             Slot::Updates => plain("Updates", "Look for a new release now."),
-            Slot::Memory => pair(
-                "Memory",
-                Some(
-                    match status.device.as_ref().is_some_and(|device| device.gpu) {
-                        true => "The app itself. The model's weights sit on the graphics card.",
-                        false => "The app and the model's weights, which run on the CPU.",
-                    }
-                    .to_owned(),
-                ),
+            Slot::Resources => plain(
+                "Resources",
+                "The memory and processor time the app takes, and the memory its model takes.",
             ),
-            Slot::GraphicsMemory => plain("Graphics memory", "The model's weights."),
-            Slot::Processor => plain("Processor", "How busy the app keeps the CPU."),
             Slot::Version => pair(
                 "Tokativ",
                 Some(format!(
@@ -872,29 +877,7 @@ impl Settings {
                     .on_click(|_, _, cx| Host::global(cx).dispatch(crate::Action::Updates, cx));
                 self.row(slot, button, cx)
             }
-            Slot::Memory => {
-                let memory = chrome::size(self.usage.memory);
-                self.row(slot, reading(memory, cx), cx)
-            }
-            Slot::GraphicsMemory => {
-                let weights = ModelId::parse(&config.model).and_then(|id| {
-                    match self.library.read(cx).state(&id) {
-                        ModelState::Installed { bytes } => Some(bytes),
-                        _ => None,
-                    }
-                });
-                let shown = weights
-                    .map(|bytes| format!("about {}", chrome::size(bytes)))
-                    .unwrap_or_else(|| "Unknown".to_owned());
-                self.row(slot, reading(shown, cx), cx)
-            }
-            Slot::Processor => {
-                let cpu = match self.usage.cpu {
-                    Some(cpu) => format!("{cpu:.0}% of a core"),
-                    None => "Measuring".to_string(),
-                };
-                self.row(slot, reading(cpu, cx), cx)
-            }
+            Slot::Resources => self.resources(config, cx),
             Slot::Version => self.row(slot, div(), cx),
         }
     }
@@ -1051,6 +1034,121 @@ impl Settings {
             .width(Picker::REGULAR)
             .items(items);
         self.row(Slot::Theme, picker, cx)
+    }
+
+    /// The app's memory and processor time and the model's memory, side by side. The app's own
+    /// memory leaves out the weights when they sit in it, so the columns add up.
+    fn resources(&self, config: &Config, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let gpu = self
+            .status
+            .read(cx)
+            .device
+            .as_ref()
+            .is_some_and(|device| device.gpu);
+        let id = ModelId::parse(&config.model);
+        let weights = id
+            .as_ref()
+            .and_then(|id| match self.library.read(cx).state(id) {
+                ModelState::Installed { bytes } => Some(bytes),
+                _ => None,
+            });
+        let model = id
+            .map(|id| models::Described::of(id).name)
+            .unwrap_or_default();
+        let hardware = self.hardware.as_deref().unwrap_or_default();
+        let total = |on_gpu: bool| {
+            hardware
+                .iter()
+                .find(|hardware| hardware.gpu == on_gpu)
+                .map(|hardware| hardware.memory)
+                .filter(|memory| *memory > 0)
+        };
+        let ram = total(false);
+        let model_total = total(gpu);
+        let share = |part: u64, whole: Option<u64>| whole.map(|whole| part as f32 / whole as f32);
+
+        // On the processor the weights count in the app's resident memory while loaded, which
+        // is when it holds more than they take.
+        let resident = self.usage.memory;
+        let app = match (gpu, weights) {
+            (false, Some(weights)) if resident > weights => resident - weights,
+            _ => resident,
+        };
+        let of_memory = |whole: Option<u64>, what: &str| match whole {
+            Some(whole) => format!("of {} {what}", chrome::memory(whole)),
+            None => what.to_owned(),
+        };
+
+        let app_memory = Reading {
+            id: "reading-app-memory",
+            label: "App RAM",
+            value: chrome::size(app),
+            share: share(app, ram),
+            of: of_memory(ram, "memory"),
+            tip: "Memory Tokativ itself takes: the windows, the audio and the engine, without \
+                  the model's weights."
+                .to_owned(),
+        };
+        let cpu = self.usage.cpu;
+        let app_cpu = Reading {
+            id: "reading-app-cpu",
+            label: "App CPU",
+            value: cpu
+                .map(|cpu| format!("{cpu:.0}%"))
+                .unwrap_or_else(|| "…".to_owned()),
+            share: cpu.map(|cpu| cpu / 100.),
+            of: "of one core".to_owned(),
+            tip: "How busy Tokativ keeps the processor, as a share of one core. It rises while \
+                  you speak and the model listens."
+                .to_owned(),
+        };
+        let model_memory = Reading {
+            id: "reading-model-memory",
+            label: match gpu {
+                true => "Model VRAM",
+                false => "Model RAM",
+            },
+            value: weights
+                .map(chrome::size)
+                .unwrap_or_else(|| "None".to_owned()),
+            share: weights.and_then(|weights| share(weights, model_total)),
+            of: match gpu {
+                true => of_memory(model_total, "video memory"),
+                false => of_memory(model_total, "memory"),
+            },
+            tip: match (weights, gpu) {
+                (None, _) => "No model is downloaded yet.".to_owned(),
+                (Some(_), true) => format!(
+                    "The weights of {model}, held on the graphics card while the model is \
+                     loaded. About the size of the download."
+                ),
+                (Some(_), false) => format!(
+                    "The weights of {model}, held in memory while the model is loaded. About \
+                     the size of the download."
+                ),
+            },
+        };
+
+        let divider = || div().w(px(1.)).flex_none().bg(theme.border.opacity(0.6));
+        div()
+            .py_2()
+            .child(
+                div()
+                    .flex()
+                    .rounded(chrome::GROUP_RADIUS)
+                    .squircle()
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(theme.border.opacity(0.6))
+                    .bg(theme.secondary.opacity(0.25))
+                    .child(reading(app_memory, cx))
+                    .child(divider())
+                    .child(reading(app_cpu, cx))
+                    .child(divider())
+                    .child(reading(model_memory, cx)),
+            )
+            .into_any_element()
     }
 
     fn unload(&self, config: &Config, cx: &mut Context<Self>) -> AnyElement {
@@ -1863,11 +1961,52 @@ fn item(
 }
 
 /// A measured value shown where a control would go.
-fn reading(text: String, cx: &App) -> AnyElement {
+/// One reading of the resources row: a label, the value large, a bar for how much of the whole
+/// it takes when the whole is known, and what the whole is. `tip` explains it on hover.
+struct Reading {
+    id: &'static str,
+    label: &'static str,
+    value: String,
+    share: Option<f32>,
+    of: String,
+    tip: String,
+}
+
+fn reading(reading: Reading, cx: &App) -> AnyElement {
+    let theme = cx.theme();
     div()
-        .text_size(cx.theme().text(Text::Small))
-        .text_color(cx.theme().muted_foreground)
-        .child(text)
+        .id(reading.id)
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w_0()
+        .gap_1()
+        .px(chrome::GROUP_PADDING)
+        .py_3()
+        .hover(|style| style.bg(theme.secondary.opacity(0.45)))
+        .tip_label(reading.tip, Perch::Above)
+        .child(eyebrow(reading.label, cx).text_size(theme.text(Text::Tiny)))
+        .child(
+            div()
+                .text_size(theme.text(Text::Large))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .whitespace_nowrap()
+                .child(reading.value),
+        )
+        .child(
+            div()
+                .pt_1()
+                .child(chrome::meter(reading.share.unwrap_or(0.), px(6.), cx)),
+        )
+        .child(
+            div()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_size(theme.text(Text::Small))
+                .text_color(theme.muted_foreground)
+                .child(reading.of),
+        )
         .into_any_element()
 }
 
