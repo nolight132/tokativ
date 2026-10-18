@@ -15,6 +15,7 @@ serde_json.workspace = true
 wayland-client.workspace = true
 wayland-protocols-misc.workspace = true
 wl-clipboard-rs.workspace = true
+zbus.workspace = true
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 arboard.workspace = true
