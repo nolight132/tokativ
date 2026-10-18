@@ -764,7 +764,8 @@ impl Settings {
     }
 
     /// The column's slots, with a hairline between rows that are not under a fresh label. The
-    /// explore row reads as part of the model list above it, so no hairline touches it.
+    /// explore row reads as part of the model list above it, so no hairline touches it, and the
+    /// live preview reads as part of the editor switch above it.
     fn slots(&self, cx: &App) -> Vec<Slot> {
         let bare = match self.searching() {
             false => self.page_slots(self.page, self.visual, cx),
@@ -776,8 +777,9 @@ impl Settings {
         for slot in bare {
             let titled = matches!(slot, Slot::Title(_) | Slot::ProfileTitle);
             let explore = slot == Slot::Explore || previous == Some(Slot::Explore);
+            let joined = explore || slot == Slot::Studio;
             previous = Some(slot);
-            if parted && !titled && !explore {
+            if parted && !titled && !joined {
                 slots.push(Slot::Sep);
             }
             parted = !titled;
