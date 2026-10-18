@@ -184,7 +184,7 @@ pub(crate) fn model_row(
                 .on_click(choose)
         })
         .when_some(leading, |this, leading| {
-            this.child(div().flex_none().pt(px(2.)).child(leading))
+            this.child(div().flex_none().self_center().child(leading))
         })
         .child(
             div()
