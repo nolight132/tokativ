@@ -97,7 +97,7 @@ impl Desktop {
                 "Add these lines to your river init script and run them once, or restart river. Tap the key to start and finish dictating, or hold it while you talk."
             }
             Self::Plasma => {
-                "Open System Settings, then Keyboard, Shortcuts, Add New, Command or Script. Use this command and pick a key."
+                "Tokativ adds a Dictate shortcut to System Settings, on Meta+Shift+D unless another app has it. Tap the key to start and finish dictating, or hold it while you talk. To pick another key, open Shortcuts and find Tokativ. A modifier alone, such as Shift, only reports when it comes up, so it cannot be held."
             }
             Self::Gnome => {
                 "GNOME has no layer shell, so the pill cannot show there. Tokativ needs niri, Hyprland, Sway, river or Plasma."
@@ -125,9 +125,31 @@ impl Desktop {
         }
     }
 
+    /// Whether Tokativ binds its own key here, so setup shows where to change it rather than a
+    /// binding to copy.
+    pub fn own_shortcut(self) -> bool {
+        self == Self::Plasma
+    }
+
+    /// Opens the desktop's shortcut settings, where Tokativ's own key is changed.
+    pub fn open_shortcuts(self) {
+        if self != Self::Plasma {
+            return;
+        }
+        if let Err(error) = std::process::Command::new("systemsettings")
+            .arg("kcm_keys")
+            .spawn()
+        {
+            log::error!("setup: cannot open the shortcut settings: {error}");
+        }
+    }
+
     /// Looks through the desktop's config files for a line that starts dictation: `tokativ toggle`,
-    /// `press` or `hold`.
+    /// `press` or `hold`. On Plasma, the key Tokativ's own shortcut has.
     pub fn bound(self) -> Option<Bound> {
+        if self == Self::Plasma {
+            return plasma_bound();
+        }
         let file = self.config_file()?;
         let folder = file.parent()?.to_path_buf();
         let mut files = vec![file];
@@ -153,6 +175,34 @@ impl Desktop {
             })
         })
     }
+}
+
+/// The key of Tokativ's Dictate shortcut as kglobalaccel saved it, in a line such as
+/// `dictate=Meta+Shift+D,Meta+Shift+D,Dictate` under `[tokativ]`: the keys in use, the default
+/// and the name.
+fn plasma_bound() -> Option<Bound> {
+    let file = dirs::config_dir()?.join("kglobalshortcutsrc");
+    let text = fs::read_to_string(&file).ok()?;
+    let keys = plasma_keys(&text)?;
+    Some(Bound { keys, file })
+}
+
+fn plasma_keys(text: &str) -> Option<String> {
+    let mut ours = false;
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('[') {
+            ours = line == "[tokativ]";
+            continue;
+        }
+        let Some(value) = line.strip_prefix("dictate=").filter(|_| ours) else {
+            continue;
+        };
+        // Several keys for one shortcut are separated by tabs.
+        let keys = value.split(',').next()?.trim();
+        return (!keys.is_empty() && !keys.eq_ignore_ascii_case("none"))
+            .then(|| keys.replace('\t', " or "));
+    }
+    None
 }
 
 fn starts_dictation(line: &str) -> bool {
@@ -238,6 +288,17 @@ mod tests {
             .as_deref(),
             Some("Super+D")
         );
+    }
+
+    #[test]
+    fn plasma_shortcut_is_read_from_its_section() {
+        let config = "[kwin]\ndictate=Meta+D,none,Other\n\n[tokativ]\n_k_friendly_name=Tokativ\ndictate=Meta+Shift+D,Meta+Shift+D,Dictate\n";
+        assert_eq!(plasma_keys(config).as_deref(), Some("Meta+Shift+D"));
+        assert_eq!(
+            plasma_keys("[tokativ]\ndictate=none,Meta+Shift+D,Dictate\n"),
+            None
+        );
+        assert_eq!(plasma_keys("[kwin]\ndictate=Meta+D,none,Other\n"), None);
     }
 
     #[test]

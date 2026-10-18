@@ -256,6 +256,8 @@ impl Daemon {
 
         #[cfg(not(target_os = "linux"))]
         let hotkeys = start_hotkeys(&config, &events);
+        #[cfg(target_os = "linux")]
+        start_plasma_shortcut(&events);
 
         let daemon = cx.new(|cx| {
             let mut daemon = Self {
@@ -1132,6 +1134,8 @@ impl Daemon {
     fn quit(&mut self, cx: &mut Context<Self>) {
         self.cancel(cx);
         self.tray = None;
+        #[cfg(target_os = "linux")]
+        crate::plasma::stop();
         cx.quit();
     }
 }
@@ -1160,6 +1164,24 @@ fn start_hotkeys(config: &Config, events: &UnboundedSender<Event>) -> Option<Hot
     })
     .map_err(|error| log::error!("hotkey: {error:#}"))
     .ok()
+}
+
+/// On Plasma, registers Tokativ's own dictation shortcut, whose key going down and coming up are
+/// fed back like `tokativ press` and `tokativ release`, so holding it works as push to talk. A
+/// sandbox leaves the real install's shortcut alone.
+#[cfg(target_os = "linux")]
+fn start_plasma_shortcut(events: &UnboundedSender<Event>) {
+    if !crate::plasma::plasma() || tokativ_config::sandbox().is_some() {
+        return;
+    }
+    let events = events.clone();
+    crate::plasma::listen(move |down| {
+        let command = match down {
+            true => Command::Press,
+            false => Command::Release,
+        };
+        events.unbounded_send(Event::Command(command)).ok();
+    });
 }
 
 /// Connects the text insertion, with Escape and Enter fed back as events.

@@ -25,6 +25,7 @@ ui.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni.workspace = true
+zbus.workspace = true
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 global-hotkey.workspace = true

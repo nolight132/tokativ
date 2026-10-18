@@ -13,6 +13,8 @@ mod daemon;
 #[cfg(not(target_os = "linux"))]
 mod hotkey;
 mod ipc;
+#[cfg(target_os = "linux")]
+mod plasma;
 mod tray;
 
 use std::io::ErrorKind;
