@@ -7226,6 +7226,7 @@ dependencies = [
  "wayland-protocols-misc",
  "wayland-protocols-plasma",
  "wl-clipboard-rs",
+ "zbus",
 ]
 
 [[package]]

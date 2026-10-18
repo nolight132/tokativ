@@ -1,9 +1,10 @@
 //! What niri has focused: the window, so insertion can pick a way the app reads and the paste
 //! chord can follow terminal conventions, and the output, so the pill appears where the user is
-//! looking.
+//! looking. KWin tells the output too.
 
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::net::UnixStream;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 /// The window niri has focused, as far as insertion cares.
@@ -57,13 +58,44 @@ pub fn other_input_method() -> Option<String> {
     })
 }
 
-/// The connector name of niri's focused output, or `None` off niri.
+/// The connector name of the focused output on niri or KWin, or `None` elsewhere.
 pub fn focused_output() -> Option<String> {
+    match std::env::var_os("NIRI_SOCKET") {
+        Some(_) => niri_output(),
+        None => kwin_output(),
+    }
+}
+
+fn niri_output() -> Option<String> {
     let reply = niri("\"FocusedOutput\"")?;
     reply
         .pointer("/Ok/FocusedOutput/name")?
         .as_str()
         .map(str::to_owned)
+}
+
+/// KWin's active output, the one with the active window or else the pointer, by connector name
+/// as niri gives it.
+fn kwin_output() -> Option<String> {
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    if !desktop.split(':').any(|name| name.eq_ignore_ascii_case("KDE")) {
+        return None;
+    }
+    static BUS: OnceLock<Option<zbus::blocking::Connection>> = OnceLock::new();
+    let bus = BUS
+        .get_or_init(|| zbus::blocking::Connection::session().ok())
+        .as_ref()?;
+    let reply = bus
+        .call_method(
+            Some("org.kde.KWin"),
+            "/KWin",
+            Some("org.kde.KWin"),
+            "activeOutputName",
+            &(),
+        )
+        .ok()?;
+    let name: String = reply.body().deserialize().ok()?;
+    (!name.is_empty()).then_some(name)
 }
 
 /// Sends one request to niri's IPC socket and reads its reply.
