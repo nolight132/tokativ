@@ -7265,6 +7265,10 @@ dependencies = [
  "tokativ-updater",
  "ui",
  "unicode-segmentation",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-plasma",
  "windows-sys 0.61.2",
 ]
 

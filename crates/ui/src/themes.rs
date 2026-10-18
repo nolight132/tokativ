@@ -98,16 +98,49 @@ pub fn name(id: &str, cx: &App) -> Option<String> {
         .map(|theme| theme.name.clone())
 }
 
+/// A theme as the appearance page shows it, with the palettes it paints in: two for the system
+/// theme, which follows the desktop between light and dark.
+pub struct Swatch {
+    pub id: String,
+    pub name: String,
+    pub palettes: Vec<Theme>,
+}
+
+/// Every theme there is to pick, built-in ones first.
+pub fn swatches(cx: &App) -> Vec<Swatch> {
+    let built = |kind| Theme::for_look(look_of(kind), &ThemeOverrides::default());
+    let built_in = BUILT_IN.into_iter().map(|kind| Swatch {
+        id: kind.id().to_owned(),
+        name: kind.label().to_string(),
+        palettes: match kind {
+            ThemeKind::System => vec![built(ThemeKind::Light), built(ThemeKind::Dark)],
+            kind => vec![built(kind)],
+        },
+    });
+    let custom = custom(cx).iter().map(|theme| Swatch {
+        id: theme.id.clone(),
+        name: theme.name.clone(),
+        palettes: vec![Theme::for_look(look_of(ThemeKind::Dark), &theme.overrides)],
+    });
+    built_in.chain(custom).collect()
+}
+
 fn look(cx: &App) -> Look {
     let selected = cx
         .try_global::<Themes>()
         .map_or("system", |themes| themes.selected.as_str());
-    Look {
-        // A custom theme is laid over the dark one.
-        kind: BUILT_IN
+    // A custom theme is laid over the dark one.
+    look_of(
+        BUILT_IN
             .into_iter()
             .find(|kind| kind.id() == selected)
             .unwrap_or(ThemeKind::Dark),
+    )
+}
+
+fn look_of(kind: ThemeKind) -> Look {
+    Look {
+        kind,
         rounding: Rounding::Rounded,
         font: 14.,
         transparent: false,

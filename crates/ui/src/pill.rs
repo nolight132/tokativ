@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, Context, Hsla, Pixels, Size, SpringConfig, Window, WindowHandle, canvas, div,
-    point, px, svg,
+    App, Bounds, BoxShadow, Context, Hsla, Pixels, Size, SpringConfig, Window, WindowHandle,
+    canvas, div, point, px, svg,
 };
 use tokativ_audio::{BANDS, Levels};
 use tokativ_config::Pill as PillConfig;
@@ -68,10 +68,95 @@ const CLOSE_LIMIT: Duration = Duration::from_millis(700);
 /// How small and how blurred the capsule is when folded.
 const FOLDED_SCALE: f32 = 0.82;
 const FOLDED_BLUR: Pixels = px(8.);
-/// Just wide enough for the buttons shown and the bars beside them.
-fn width(config: &PillConfig) -> Pixels {
-    let buttons = config.cancel_button as u8 + config.confirm_button as u8;
-    px(PADDING_PX * 2. + BUTTON_PX * buttons as f32 + BARS_SPAN_PX)
+/// The most the pill can be made wider than it needs.
+pub(crate) const MAX_STRETCH: f32 = 240.;
+
+/// Wide enough for the buttons shown and the bars beside them, and `stretch` wider.
+pub(crate) fn width(cancel: bool, confirm: bool, stretch: f32) -> Pixels {
+    let buttons = cancel as u8 + confirm as u8;
+    px(
+        PADDING_PX * 2.
+            + BUTTON_PX * buttons as f32
+            + BARS_SPAN_PX
+            + stretch.clamp(0., MAX_STRETCH),
+    )
+}
+
+/// The capsule `width` wide as it looks at rest, for the buttons and the bars to go in, drawn at
+/// `scale`. The pill moves it as it opens and closes, and the settings show it still or shrunk
+/// onto a drawing of the screen. Drawing it small rather than shrinking a full-size picture keeps
+/// its edges sharp.
+pub(crate) fn capsule(width: Pixels, scale: f32, cx: &App) -> gpui::Div {
+    let theme = cx.theme();
+    let height = HEIGHT * scale;
+    div()
+        .w(width * scale)
+        .h(height)
+        .flex()
+        .items_center()
+        .justify_between()
+        .p((PADDING * scale - BORDER).max(Pixels::ZERO))
+        .rounded(height / 2.)
+        .bg(theme.background)
+        .border_1()
+        .border_color(theme.border)
+        .shadow(shadow(scale))
+        .overflow_hidden()
+}
+
+/// Tailwind's large shadow, which the pill and the caption cast, at `scale`.
+pub(crate) fn shadow(scale: f32) -> Vec<BoxShadow> {
+    let color = gpui::hsla(0., 0., 0., 0.1);
+    [(10., 15., -3.), (4., 6., -4.)]
+        .into_iter()
+        .map(|(offset, blur, spread)| {
+            BoxShadow::new(px(0.), px(offset * scale), color)
+                .blur_radius(px(blur * scale))
+                .spread_radius(px(spread * scale))
+        })
+        .collect()
+}
+
+/// How wide the bars and the room on either side of them are.
+pub(crate) fn bars_span() -> Pixels {
+    px(BARS_SPAN_PX)
+}
+
+/// The diameter of a button, inside the capsule's padding.
+pub(crate) fn button_size() -> Pixels {
+    nested_radius(HEIGHT / 2., PADDING) * 2.
+}
+
+/// The cross on the left that cancels the session, drawn at `scale`.
+pub(crate) fn cancel_button(
+    id: impl Into<gpui::ElementId>,
+    scale: f32,
+    cx: &App,
+) -> gpui::Stateful<gpui::Div> {
+    let theme = cx.theme();
+    circle(
+        id,
+        button_size() * scale,
+        theme.secondary,
+        theme.secondary_hover,
+    )
+    .child(icon("icons/x.svg", ICON * scale, theme.foreground))
+}
+
+/// The check mark on the right that finishes the session, drawn at `scale`.
+pub(crate) fn confirm_button(
+    id: impl Into<gpui::ElementId>,
+    scale: f32,
+    cx: &App,
+) -> gpui::Stateful<gpui::Div> {
+    let theme = cx.theme();
+    circle(
+        id,
+        button_size() * scale,
+        theme.foreground,
+        theme.foreground.opacity(0.85),
+    )
+    .child(icon("icons/check.svg", ICON * scale, theme.background))
 }
 
 /// Where the pill takes clicks: the capsule at full width, not the room around it for the shadow.
@@ -136,7 +221,7 @@ pub fn open(
     resting: bool,
     cx: &mut App,
 ) -> anyhow::Result<WindowHandle<Pill>> {
-    let width = width(config);
+    let width = width(config.cancel_button, config.confirm_button, config.stretch);
     let (cancel, confirm) = (config.cancel_button, config.confirm_button);
     let size = Size::new(width + SHADOW * 2., HEIGHT + SHADOW * 2.);
     // The shadow margin is part of the surface, so the visible gap to the edge takes it off.
@@ -317,8 +402,6 @@ impl Render for Pill {
         window.request_animation_frame();
 
         let theme = cx.theme();
-        let radius = HEIGHT / 2.;
-        let button = nested_radius(radius, PADDING) * 2.;
         let error = self.phase == Phase::Error;
         // Keep the capsule's neutral surface in every phase; errors tint only the indicator.
         let bar_color = match error {
@@ -358,22 +441,10 @@ impl Render for Pill {
         let top = ui::snapped(SHADOW, window);
 
         div().size_full().relative().font_family("Inter").child(
-            div()
+            capsule(width, 1., cx)
                 .absolute()
                 .left(left)
                 .top(top)
-                .w(width)
-                .h(HEIGHT)
-                .flex()
-                .items_center()
-                .justify_between()
-                .p(PADDING - BORDER)
-                .rounded(radius)
-                .bg(theme.background)
-                .border_1()
-                .border_color(theme.border)
-                .shadow_lg()
-                .overflow_hidden()
                 .when(moving, |this| {
                     this.opacity((unfolded * 2.5).min(1.))
                         .layer_scale(scale.max(0.01))
@@ -383,37 +454,35 @@ impl Render for Pill {
                 })
                 .when(self.cancel, |this| {
                     this.child(
-                        circle("cancel", button, theme.secondary, theme.secondary_hover)
+                        cancel_button("cancel", 1., cx)
                             .when(moving, |this| {
                                 this.opacity(control_opacity).layer_scale(pop)
                             })
-                            .child(icon("icons/x.svg", theme.foreground))
                             .on_click(move |_, _, cx| on_cancel(cx)),
                     )
                 })
-                .child(bars(shown, reveal, bar_color).flex_1().h_full())
+                .child(bars(shown, reveal, bar_color, 1.).flex_1().h_full())
                 .when(self.confirm, |this| {
                     this.child(
-                        circle(
-                            "confirm",
-                            button,
-                            theme.foreground,
-                            theme.foreground.opacity(0.85),
-                        )
-                        .opacity(match listening {
-                            true => control_opacity,
-                            false => control_opacity * 0.5,
-                        })
-                        .when(moving, |this| this.layer_scale(pop))
-                        .child(icon("icons/check.svg", theme.background))
-                        .on_click(move |_, _, cx| on_confirm(cx)),
+                        confirm_button("confirm", 1., cx)
+                            .opacity(match listening {
+                                true => control_opacity,
+                                false => control_opacity * 0.5,
+                            })
+                            .when(moving, |this| this.layer_scale(pop))
+                            .on_click(move |_, _, cx| on_confirm(cx)),
                     )
                 }),
         )
     }
 }
 
-fn circle(id: &'static str, size: Pixels, fill: Hsla, hover: Hsla) -> gpui::Stateful<gpui::Div> {
+fn circle(
+    id: impl Into<gpui::ElementId>,
+    size: Pixels,
+    fill: Hsla,
+    hover: Hsla,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .flex_none()
@@ -427,29 +496,57 @@ fn circle(id: &'static str, size: Pixels, fill: Hsla, hover: Hsla) -> gpui::Stat
         .cursor_pointer()
 }
 
-fn icon(path: &'static str, color: Hsla) -> impl IntoElement {
-    svg().path(icons::path(path)).size(ICON).text_color(color)
+fn icon(path: &'static str, size: Pixels, color: Hsla) -> impl IntoElement {
+    svg().path(icons::path(path)).size(size).text_color(color)
 }
 
 /// Paints the bars as rounded rectangles centered on the pill's midline, low frequencies on the
-/// left. `reveal` says how much of each bar shows while the pill opens and closes. A silent band draws a dot as tall as the bar is wide, so silence reads as a flat dotted
-/// line. Every edge lands on a whole device pixel, so at fractional scales all bars come out the
-/// same width and the dots sit on one line.
-fn bars(levels: [f32; BARS], reveal: [f32; BARS], color: Hsla) -> gpui::Div {
+/// left. `reveal` says how much of each bar shows while the pill opens and closes. A silent band
+/// draws a dot as tall as the bar is wide, so silence reads as a flat dotted line. Given more
+/// room than the bands need, more bars fill it, each following the bands on either side of it.
+/// They come in pairs, one at each end, so the bars already there keep their places, and the
+/// pair coming in fades and grows in as the room for it opens. `size` draws them smaller, for a pill drawn small. Every edge lands on a
+/// whole device pixel, so at fractional scales all bars come out the same width and the dots
+/// sit on one line.
+pub(crate) fn bars(levels: [f32; BARS], reveal: [f32; BARS], color: Hsla, size: f32) -> gpui::Div {
     div().child(
         canvas(
             |_, _, _| {},
             move |bounds, _, window, _| {
                 let scale = window.scale_factor();
                 let device = |logical: f32| (logical * scale).round();
-                let width = device(BAR_WIDTH_PX).max(1.);
-                let gap = device(BAR_GAP_PX).max(1.);
-                let span = width * BARS as f32 + gap * (BARS - 1) as f32;
+                let width = device(BAR_WIDTH_PX * size).max(1.);
+                let gap = device(BAR_GAP_PX * size).max(1.);
+                let room = device(bounds.size.width.as_f32()) - device(BAR_MARGIN_PX * size) * 2.;
+                // How many bars the room holds, fractions included, and so how many pairs beyond
+                // the bands and how far in the last pair has come.
+                let fits = ((room + gap) / (width + gap)).max(BARS as f32);
+                let pairs = (fits - BARS as f32) / 2.;
+                let count = BARS + pairs.ceil() as usize * 2;
+                let incoming = match pairs.fract() {
+                    0. => 1.,
+                    part => part,
+                };
+                let span = width * count as f32 + gap * (count - 1) as f32;
                 let left = device(bounds.origin.x.as_f32())
                     + ((device(bounds.size.width.as_f32()) - span) / 2.).round();
                 let middle = device(bounds.origin.y.as_f32() + bounds.size.height.as_f32() / 2.);
                 let reach = bounds.size.height.as_f32() * BAR_REACH * scale;
-                for (index, (level, shown)) in levels.into_iter().zip(reveal).enumerate() {
+                // The bands stretch over the room as it is, not just over whole bars, so they
+                // slide along smoothly as the pill widens.
+                let half = (fits - 1.) / 2.;
+                let middle_band = (BARS - 1) as f32 / 2.;
+                for index in 0..count {
+                    let from_middle = index as f32 - (count - 1) as f32 / 2.;
+                    let band = (middle_band + from_middle / half * middle_band)
+                        .clamp(0., (BARS - 1) as f32);
+                    let outermost = index == 0 || index == count - 1;
+                    let arriving = match outermost && count > BARS {
+                        true => incoming,
+                        false => 1.,
+                    };
+                    let level = between(&levels, band);
+                    let shown = between(&reveal, band) * arriving;
                     if shown <= 0. {
                         continue;
                     }
@@ -473,14 +570,28 @@ fn bars(levels: [f32; BARS], reveal: [f32; BARS], color: Hsla) -> gpui::Div {
     )
 }
 
+/// The value at `at` along `values`, read between the two either side of it.
+fn between(values: &[f32; BARS], at: f32) -> f32 {
+    let low = (at.floor() as usize).min(BARS - 1);
+    let high = (low + 1).min(BARS - 1);
+    let along = at - low as f32;
+    values[low] + (values[high] - values[low]) * along
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    fn extra_bars_follow_the_bands_beside_them() {
+        let levels = std::array::from_fn(|band| band as f32);
+        assert_eq!(between(&levels, 0.), 0.);
+        assert_eq!(between(&levels, 2.5), 2.5);
+        assert_eq!(between(&levels, (BARS - 1) as f32), (BARS - 1) as f32);
+    }
+
+    #[test]
     fn buttons_follow_the_radius_rule() {
-        let radius = HEIGHT / 2.;
-        let button = nested_radius(radius, PADDING) * 2.;
-        assert_eq!(button + PADDING * 2., HEIGHT);
+        assert_eq!(button_size() + PADDING * 2., HEIGHT);
     }
 }

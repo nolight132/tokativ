@@ -245,6 +245,8 @@ pub struct Pill {
     pub cancel_button: bool,
     /// Show the check mark that finishes the session. Enter and the hotkey work either way.
     pub confirm_button: bool,
+    /// Logical pixels the pill is made wider than it needs, which it fills with more bars.
+    pub stretch: f32,
 }
 
 impl Default for Pill {
@@ -255,6 +257,7 @@ impl Default for Pill {
             caption: !cfg!(target_os = "linux"),
             cancel_button: true,
             confirm_button: true,
+            stretch: 0.,
         }
     }
 }
