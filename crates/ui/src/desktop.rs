@@ -111,7 +111,7 @@ impl Desktop {
     /// binding repeats while held and the repeats stand in for the key being down.
     pub fn snippet(self) -> &'static str {
         match self {
-            Self::Niri => "Mod+D cooldown-ms=100 { spawn \"tokativ\" \"hold\"; }",
+            Self::Niri => "Mod+D { spawn \"tokativ\" \"hold\"; }",
             Self::Hyprland => {
                 "bind = SUPER, D, exec, tokativ press\nbindr = SUPER, D, exec, tokativ release"
             }
