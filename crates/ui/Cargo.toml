@@ -11,6 +11,7 @@ futures.workspace = true
 gpui.workspace = true
 icons.workspace = true
 log.workspace = true
+pulldown-cmark.workspace = true
 tokativ-audio.workspace = true
 tokativ-config.workspace = true
 ui.workspace = true

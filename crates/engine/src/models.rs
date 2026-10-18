@@ -498,6 +498,44 @@ fn files(client: &reqwest::blocking::Client, repo: &str) -> Result<Vec<RemoteFil
     Ok(files)
 }
 
+/// A repository's model card, its README in Markdown, or nothing when it has none. Blocks.
+pub fn model_card(repo: &str) -> Result<String> {
+    let response = client()?
+        .get(format!("{HUB}/{repo}/raw/main/README.md"))
+        .send()
+        .with_context(|| format!("fetching the card of {repo}"))?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(String::new());
+    }
+    response
+        .error_for_status()
+        .with_context(|| format!("fetching the card of {repo}"))?
+        .text()
+        .with_context(|| format!("reading the card of {repo}"))
+}
+
+/// The file of a repository to recommend for this setup: full precision on a graphics card,
+/// which runs it as fast as a smaller copy, and Q8_0 on the processor, as accurate and quicker
+/// there. Without either, the quantization the search prefers.
+pub fn recommended_file(files: &[RemoteFile], gpu: bool) -> Option<&RemoteFile> {
+    let wanted: &[&str] = match gpu {
+        true => &["F16", "Q8_0"],
+        false => &["Q8_0"],
+    };
+    wanted
+        .iter()
+        .find_map(|quant| {
+            files
+                .iter()
+                .find(|file| file.quantization() == Some(*quant))
+        })
+        .or_else(|| {
+            files
+                .iter()
+                .min_by_key(|file| preference(file.quantization()))
+        })
+}
+
 /// The GGUF files in a repository, the preferred quantization first. Blocks.
 pub fn repository_files(repo: &str) -> Result<Vec<RemoteFile>> {
     files(&client()?, repo)
@@ -559,6 +597,23 @@ mod tests {
                 assert!(suggested.bytes > 0, "{}", suggested.id);
             }
         }
+    }
+
+    #[test]
+    fn the_recommended_file_suits_the_device() {
+        let files = ["x-F16.gguf", "x-Q4_K_M.gguf", "x-Q8_0.gguf", "x-BF16.gguf"]
+            .map(|name| RemoteFile {
+                name: name.into(),
+                size: 0,
+                sha256: None,
+            })
+            .to_vec();
+        let pick =
+            |files: &[RemoteFile], gpu| recommended_file(files, gpu).map(|file| file.name.clone());
+        assert_eq!(pick(&files, true).as_deref(), Some("x-F16.gguf"));
+        assert_eq!(pick(&files, false).as_deref(), Some("x-Q8_0.gguf"));
+        assert_eq!(pick(&files[1..2], false).as_deref(), Some("x-Q4_K_M.gguf"));
+        assert_eq!(pick(&[], true), None);
     }
 
     #[test]

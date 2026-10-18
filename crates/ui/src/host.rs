@@ -133,6 +133,14 @@ pub enum Files {
     Failed(String),
 }
 
+/// A repository's model card, read into blocks once it arrives.
+#[derive(Clone)]
+pub enum Card {
+    Loading,
+    Loaded(std::sync::Arc<Vec<crate::markdown::Block>>),
+    Failed(String),
+}
+
 /// A search of Hugging Face and what came back.
 #[derive(Default)]
 pub struct Search {
@@ -142,6 +150,8 @@ pub struct Search {
     pub error: Option<String>,
     /// The files of repositories the user opened, by repository.
     pub files: HashMap<String, Files>,
+    /// The model cards of repositories the user opened, by repository.
+    pub cards: HashMap<String, Card>,
     /// Counts searches, so a slow answer to an old query is dropped.
     generation: u64,
 }
@@ -342,7 +352,26 @@ impl Library {
             return;
         }
         self.search.files.insert(repo.clone(), Files::Loading);
+        self.search.cards.insert(repo.clone(), Card::Loading);
         cx.notify();
+        let carded = repo.clone();
+        let reading = cx.background_spawn(async move {
+            models::model_card(&carded).map(|card| crate::markdown::parse(&card))
+        });
+        let card_repo = repo.clone();
+        cx.spawn(async move |this, cx| {
+            let card = reading.await;
+            this.update(cx, |this, cx| {
+                let card = match card {
+                    Ok(blocks) => Card::Loaded(std::sync::Arc::new(blocks)),
+                    Err(error) => Card::Failed(format!("{error:#}")),
+                };
+                this.search.cards.insert(card_repo, card);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
         let listed = repo.clone();
         let request = cx.background_spawn(async move { models::repository_files(&listed) });
         cx.spawn(async move |this, cx| {

@@ -18,7 +18,7 @@ use ui::{
 };
 
 use crate::chrome::{self, veil};
-use crate::host::{Files, Host, Library, ModelState, Status, Store};
+use crate::host::{Card, Files, Host, Library, ModelState, Status, Store};
 use crate::models;
 use crate::setup::Setup;
 use crate::themes;
@@ -255,7 +255,7 @@ pub struct Settings {
     entrance: Option<Entrance>,
     results_scroll: UniformListScrollHandle,
     results_scrollbar: Entity<Scrollbar>,
-    files_scroll: UniformListScrollHandle,
+    /// Scrolls an opened repository's files and model card.
     files_scrollbar: Entity<Scrollbar>,
     _debounce: Option<Task<()>>,
 }
@@ -302,7 +302,6 @@ impl Settings {
         })
         .detach();
         let results_scroll = UniformListScrollHandle::new();
-        let files_scroll = UniformListScrollHandle::new();
         cx.observe_window_appearance(window, |_, _, cx| {
             crate::refresh_theme(cx);
             cx.notify();
@@ -341,10 +340,7 @@ impl Settings {
                 Scrollbar::new(results_scroll.0.borrow().base_handle.clone()).watching(view)
             }),
             results_scroll,
-            files_scrollbar: cx.new(|_| {
-                Scrollbar::new(files_scroll.0.borrow().base_handle.clone()).watching(view)
-            }),
-            files_scroll,
+            files_scrollbar: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(view)),
             _debounce: None,
             _sampling: cx.spawn(async move |this, cx| {
                 let mut sampler = Sampler::default();
@@ -1491,10 +1487,13 @@ impl Settings {
 
         let (top, list) = match (self.opened.clone(), files) {
             (Some(repo), Some(files)) => {
+                let card = search.cards.get(&repo).cloned();
                 let found = results
                     .iter()
                     .find(|repository| repository.id == repo)
                     .cloned();
+                let page = format!("https://huggingface.co/{repo}");
+                let copied = page.clone();
                 let top = div()
                     .flex()
                     .flex_col()
@@ -1502,39 +1501,83 @@ impl Settings {
                     .child(div().flex().child(back("Results", cx)))
                     .child(
                         div()
-                            .text_size(theme.text(Text::Large))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child(repo.clone()),
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(theme.text(Text::Large))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child(repo.clone()),
+                            )
+                            .child(
+                                Button::new("copy-repository-link")
+                                    .label("Copy link")
+                                    .icon("icons/copy.svg")
+                                    .small()
+                                    .outline()
+                                    .on_click(move |_, _, cx| {
+                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                            copied.clone(),
+                                        ))
+                                    }),
+                            ),
                     )
                     .when_some(found.as_ref(), |this, repository| {
                         this.child(models::facts(repository, cx))
                     })
                     .into_any_element();
-                let list = match files {
+                let gpu = self.runs_on_gpu(cx);
+                let files_block = match files {
                     Ok(files) => {
-                        let count = files.len();
-                        let rows = uniform_list(
-                            "repository-files",
-                            count,
-                            cx.processor(move |this, range: Range<usize>, _, cx| {
-                                range
-                                    .map(|index| {
-                                        models::file_row(&repo, &files[index], &this.library, cx)
-                                    })
-                                    .collect::<Vec<_>>()
-                            }),
-                        )
-                        .track_scroll(&self.files_scroll)
-                        .size_full();
-                        listed(
-                            Scroller::listing("repository-files-scroll", &self.files_scrollbar)
-                                .child(rows)
-                                .into_any_element(),
-                            cx,
-                        )
+                        let recommended = tokativ_engine::models::recommended_file(&files, gpu)
+                            .map(|file| file.name.clone());
+                        div()
+                            .flex()
+                            .flex_col()
+                            .py_1()
+                            .rounded(chrome::GROUP_RADIUS)
+                            .squircle()
+                            .bg(theme.secondary.opacity(0.45))
+                            .border_1()
+                            .border_color(theme.border.opacity(0.6))
+                            .children(files.iter().map(|file| {
+                                let picked = recommended.as_ref() == Some(&file.name);
+                                models::file_row(&repo, file, picked, &self.library, cx)
+                            }))
+                            .into_any_element()
                     }
                     Err(waiting) => hint(&waiting, cx),
                 };
+                let card = match card {
+                    Some(Card::Loaded(blocks)) if !blocks.is_empty() => {
+                        crate::markdown::render(&blocks, &page, cx)
+                    }
+                    Some(Card::Loaded(_)) => hint("This repository has no model card.", cx),
+                    None | Some(Card::Loading) => hint("Reading the model card", cx),
+                    Some(Card::Failed(error)) => {
+                        hint(&format!("Cannot read the model card: {error}"), cx)
+                    }
+                };
+                let body = div()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .pb_2()
+                    .child(files_block)
+                    .child(card);
+                let list = div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .child(Scroller::new("repository", &self.files_scrollbar).child(body))
+                    .into_any_element();
                 (top, list)
             }
             _ => {
@@ -1620,6 +1663,21 @@ impl Settings {
                     .child(list),
             )
             .into_any_element()
+    }
+
+    /// Whether models run on a graphics card as the settings stand: the one chosen under
+    /// Runtime, or with it left automatic, the device the last model loaded on.
+    fn runs_on_gpu(&self, cx: &App) -> bool {
+        match self.store.read(cx).config().processor {
+            Processor::Gpu => true,
+            Processor::Cpu => false,
+            Processor::Auto => self
+                .status
+                .read(cx)
+                .device
+                .as_ref()
+                .is_some_and(|device| device.gpu),
+        }
     }
 
     /// Searches once typing pauses, so each keystroke does not reach the network.

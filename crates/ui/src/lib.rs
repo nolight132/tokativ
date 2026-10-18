@@ -8,6 +8,7 @@ mod chrome;
 mod desktop;
 mod host;
 mod hotkey;
+mod markdown;
 mod models;
 mod overlay;
 pub mod pill;
