@@ -10,10 +10,14 @@ log.workspace = true
 tokativ-config.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+dirs.workspace = true
 rustix.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 wayland-client.workspace = true
+wayland-protocols.workspace = true
 wayland-protocols-misc.workspace = true
+wayland-protocols-plasma.workspace = true
 wl-clipboard-rs.workspace = true
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]

@@ -31,7 +31,9 @@ rustfft = "6.4"
 rustix = { version = "1", features = ["event", "fs"] }
 serde_json = "1.0"
 wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
+wayland-protocols-plasma = { version = "0.3", features = ["client"] }
 wl-clipboard-rs = "0.9"
 futures = "0.3"
 hound = "3.5"

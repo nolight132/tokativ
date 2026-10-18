@@ -4,7 +4,6 @@
 //! the daemon's global hotkeys rather than here.
 
 use std::sync::mpsc::{Receiver, SyncSender};
-use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -12,7 +11,7 @@ use anyhow::{Context as _, Result, anyhow};
 use arboard::Clipboard;
 use enigo::{Direction, Enigo, Key, Keyboard as _, Settings};
 
-use crate::{Backend, KeyHandler, Method, Request, Status};
+use crate::{Backend, KeyHandler, Method, Request, Shared, Status};
 
 /// How long the app gets to read the clipboard after the paste chord before the old contents
 /// go back.
@@ -25,7 +24,7 @@ pub(crate) fn run(
     _terminals: Vec<String>,
     requests: Receiver<Request>,
     ready: SyncSender<Result<Status>>,
-    _before: Arc<Mutex<Option<String>>>,
+    shared: Shared,
     _keys: KeyHandler,
 ) {
     let mut keyboard = match Enigo::new(&Settings::default()) {
@@ -39,6 +38,7 @@ pub(crate) fn run(
     };
     let status = choose(preferred);
     let method = status.method;
+    shared.set_status(status.clone());
     ready.send(Ok(status)).ok();
     for request in requests {
         if let Request::Insert { text, .. } = request

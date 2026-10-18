@@ -84,6 +84,11 @@ enum Verb {
     /// Apply a verified update after the parent daemon has exited
     #[command(hide = true)]
     ApplyUpdate { manifest: std::path::PathBuf },
+    /// Serve as KWin's input method. KWin starts this itself once Tokativ is chosen under
+    /// System Settings → Keyboard → Virtual Keyboard
+    #[cfg(target_os = "linux")]
+    #[command(hide = true)]
+    InputMethod,
 }
 
 fn main() -> ExitCode {
@@ -105,6 +110,8 @@ fn main() -> ExitCode {
             step,
         }) => sandbox(keep, with_models, step),
         Some(Verb::ApplyUpdate { manifest }) => tokativ_updater::apply(&manifest),
+        #[cfg(target_os = "linux")]
+        Some(Verb::InputMethod) => tokativ_input::serve_input_method(),
         Some(verb) => send(command(verb)),
     };
     match result {
@@ -121,6 +128,8 @@ fn command(verb: Verb) -> Command {
         Verb::Daemon | Verb::Sandbox { .. } | Verb::ApplyUpdate { .. } => {
             unreachable!("handled in main")
         }
+        #[cfg(target_os = "linux")]
+        Verb::InputMethod => unreachable!("handled in main"),
         Verb::Toggle => Command::Toggle,
         Verb::Press => Command::Press,
         Verb::Release => Command::Release,
