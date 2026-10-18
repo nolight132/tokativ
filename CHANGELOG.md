@@ -7,23 +7,62 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-19
+
 ### Added
 
 - Push to talk. Hold the dictation key while you talk and let go to finish, or tap it to start
-  and tap again to finish as before. It works on macOS, Windows, Hyprland, Sway, river and niri.
-  Setup shows the new bindings, which run `tokativ press` and `tokativ release`, or
-  `tokativ hold` on niri, which cannot run a command when a key comes up.
+  and tap again to finish as before. It works on macOS, Windows, Hyprland, Sway, river, niri and
+  Plasma. Setup shows the new bindings, which run `tokativ press` and `tokativ release`, or
+  `tokativ hold` on niri, which cannot run a command when a key comes up. On Plasma Tokativ
+  registers a Dictate shortcut of its own, on Meta+Shift+D unless another app has it.
 - The input method on KDE Plasma. KWin keeps it for the program chosen under System Settings →
   Keyboard → Virtual Keyboard, so Tokativ offers itself there and picks itself once when nothing
   else is chosen. Text, live drafts, and Escape and Enter during a session then work in Plasma
   apps as they do on niri.
+- An Appearance page with a live preview of the pill and its caption, edited in place. Clicking
+  a button or the caption hides it, dragging an end of the pill or the caption sets its width,
+  and holding the arrow under the pill drops it onto a drawing of the main monitor to set its
+  edge and its distance from it. A Visual and List switch brings back the plain rows.
+- Three layouts for the pill's bars: low to high tones, mirrored from the middle, or a peak in
+  the middle. The preview picks one from its corner.
+- Settings for the pill's width and for how wide the live caption grows.
+- Rosé Pine, Nord and Dracula themes, shown with the others as cards that scroll sideways.
+- A model's page with its model card, likes and the file recommended for the device, opened
+  from the model search or from the info button beside an installed model.
+- Each model in the lists shows the first line of its model card. The cards are kept on disk,
+  so the lines are there as soon as a list opens.
+- The setup asks whether the graphics card or the processor runs the model before offering
+  models that suit it, with a warning when one may not fit in its memory.
+- Links to the Open ASR Leaderboard and Handy's model list beside the model search.
+- Ctrl+F, or Cmd+F on macOS, puts the cursor in the settings search.
+
+### Changed
+
+- The theme and the pill's settings moved from General to Appearance.
+- The resources show as three readings side by side, each with a bar of how much of the whole
+  it takes.
+- Models are named after their repository rather than a written summary, and a model's page
+  opens Hugging Face in the browser instead of copying its link.
+- The model list shows models while they download, and keeps a failed download there to try
+  again.
+- The live caption grows to at most 550 px, and the settings window keeps a width that shows
+  the widest caption whole.
 
 ### Fixed
 
 - The niri and Sway bindings from setup no longer start and finish dictation over and over
-  while the key is held.
+  while the key is held. The niri binding no longer needs a cooldown.
 - On Plasma, text the input method cannot reach, as in X11 apps, is pasted with KWin's fake
   input. It used to be left on the clipboard.
+- On Plasma the pill opens on the active output, and Shift and Ctrl reach the app while the
+  input method holds the keyboard.
+- "Drop the last" period only drops the one that ends the dictation. Pausing between sentences
+  used to lose all their periods.
+- Device names leave out the driver and codename Vulkan appends.
+- The launch at login entry keeps pointing at the installed binary.
+- The tray icon shows up when the panel starts after the daemon.
+- macOS keeps the Accessibility grant across updates.
 
 ## [0.4.0] - 2026-10-18
 
@@ -139,7 +178,8 @@ focused app as you speak.
 - A tray icon and a `tokativ` command line control the daemon.
 - The Home Manager module runs Tokativ as a user service and can fetch models at build time.
 
-[unreleased]: https://github.com/nolight132/tokativ/compare/v0.4.0...HEAD
+[unreleased]: https://github.com/nolight132/tokativ/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/nolight132/tokativ/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/nolight132/tokativ/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/nolight132/tokativ/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/nolight132/tokativ/compare/v0.2.0...v0.3.0
