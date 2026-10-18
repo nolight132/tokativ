@@ -145,6 +145,12 @@ pub struct Daemon {
 
 /// Starts the daemon and blocks until it quits.
 pub fn run(config: Config) -> Result<()> {
+    // The entry names the binary that wrote it, so an upgrade would leave it starting the old one.
+    if config.launch_at_login
+        && let Err(error) = autostart::apply(true)
+    {
+        log::error!("autostart: {error:#}");
+    }
     // A second start is not a failure, so a service manager does not keep retrying it.
     if ipc::send(&socket_path(), &Command::Ping).is_ok() {
         log::info!("tokativ is already running");

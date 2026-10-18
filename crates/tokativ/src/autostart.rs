@@ -10,7 +10,26 @@ use tokativ_config::{APP_ID, autostart_dir};
 /// Writes or removes the autostart entry so it matches `enabled`.
 pub fn apply(enabled: bool) -> Result<()> {
     let exe = std::env::current_exe().context("finding the running binary")?;
-    platform::apply(enabled, &exe)
+    platform::apply(enabled, &launcher(exe))
+}
+
+/// The path the entry should start. A binary in the Nix store is replaced by the link to it on
+/// `PATH`, because the store path stops existing or goes stale after the next upgrade.
+fn launcher(exe: PathBuf) -> PathBuf {
+    let package: PathBuf = exe.components().take(4).collect();
+    if !exe.starts_with("/nix/store") || package.components().count() < 4 {
+        return exe;
+    }
+    let Some(path) = std::env::var_os("PATH") else {
+        return exe;
+    };
+    std::env::split_paths(&path)
+        .map(|folder| folder.join("tokativ"))
+        .find(|link| {
+            !link.starts_with("/nix/store")
+                && fs::canonicalize(link).is_ok_and(|target| target.starts_with(&package))
+        })
+        .unwrap_or(exe)
 }
 
 /// Writes `text` to `path`, or removes the file when `text` is `None`.
