@@ -1576,7 +1576,24 @@ impl Settings {
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .child(div().flex().child(back("Models", cx)))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(back("Models", cx))
+                            .child(div().flex().gap_2().children(GUIDES.map(
+                                |(id, label, url)| {
+                                    Button::new(id)
+                                        .label(label)
+                                        .icon("icons/external-link.svg")
+                                        .small()
+                                        .outline()
+                                        .on_click(move |_, _, cx| cx.open_url(url))
+                                },
+                            ))),
+                    )
                     .child(self.model_search.clone())
                     .into_any_element();
                 (top, list)
@@ -1715,6 +1732,20 @@ impl Settings {
             .into_any_element()
     }
 }
+
+/// Pages that compare speech models, offered beside the search for picking one to look for.
+const GUIDES: [(&str, &str, &str); 2] = [
+    (
+        "guide-leaderboard",
+        "ASR leaderboard",
+        "https://huggingface.co/spaces/hf-audio/open_asr_leaderboard",
+    ),
+    (
+        "guide-handy",
+        "Handy models",
+        "https://models.handy.computer/",
+    ),
+];
 
 /// A group label over the rows that follow it, in Sonora's eyebrow style.
 fn title(label: &str, cx: &App) -> AnyElement {
