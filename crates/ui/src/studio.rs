@@ -589,12 +589,18 @@ impl Studio {
             pill::face(px(0.), height, cx)
         });
         let layout = config.bars;
+        let edges = (laid / 2. - exact / 2., laid / 2. + exact / 2.);
         let bars_width = (pill::bars_span() + px(config.stretch)) * scale;
+        // The bars follow the capsule's padding and the room the cancel button takes, as they
+        // do in the session's pill.
+        let padding = (pill::HEIGHT - pill::button_size()) / 2. * scale;
+        let bars_left =
+            px(edges.0) + padding + pill::button_size() * scale * self.cancel.at().max(0.);
         let bars = pill::bars(levels, [1.; BANDS], theme.foreground, scale, layout)
             .id("studio-bars")
             .absolute()
             .top_0()
-            .left((px(laid) - bars_width) / 2.)
+            .left(bars_left)
             .w(bars_width)
             .h(height)
             .when(resting == 1., |this| {
@@ -611,7 +617,6 @@ impl Studio {
                         this.edit(cx, |pill| pill.bars = layout.next())
                     }))
             });
-        let edges = (laid / 2. - exact / 2., laid / 2. + exact / 2.);
         let cancel = self.button(
             Side::Cancel,
             config.cancel_button,
