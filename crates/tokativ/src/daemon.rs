@@ -9,7 +9,7 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gpui::{App, AppContext as _, AsyncApp, Context, Entity, KeyBinding, QuitMode, WindowHandle};
 use notify::{RecursiveMode, Watcher as _};
 use tokativ_audio::{Levels, Options, Recorder, Silero, SpeechDetector, Timing};
-use tokativ_config::{Capitals, Config, config_dir, config_path, socket_path};
+use tokativ_config::{Capitals, Config, Periods, config_dir, config_path, socket_path};
 use tokativ_engine::{Joiner, ModelId, Transcriber, restyle};
 use tokativ_input::{Inserter, Key, Method};
 use tokativ_ui::{Action, Caption, Host, Library, Phase, Pill, Status, Store};
@@ -826,9 +826,10 @@ impl Daemon {
             false => String::new(),
         };
         let before = self.inserter.as_ref().and_then(Inserter::before_cursor);
-        let joiner = session
-            .joiner
-            .get_or_insert_with(|| Joiner::new(before.as_deref(), capitalize));
+        let joiner = session.joiner.get_or_insert_with(|| {
+            Joiner::new(before.as_deref(), capitalize)
+                .hold_periods(style.periods == Periods::DropFinal)
+        });
         let joined = joiner.join(&restyle(&text, style));
         if let Some(text) = &joined {
             session.written.push_str(text);
@@ -857,9 +858,10 @@ impl Daemon {
             return;
         };
         let before = self.inserter.as_ref().and_then(Inserter::before_cursor);
-        let joiner = session
-            .joiner
-            .get_or_insert_with(|| Joiner::new(before.as_deref(), capitalize));
+        let joiner = session.joiner.get_or_insert_with(|| {
+            Joiner::new(before.as_deref(), capitalize)
+                .hold_periods(style.periods == Periods::DropFinal)
+        });
         let Some(preview) = joiner.preview(&restyle(&text, style)) else {
             return;
         };

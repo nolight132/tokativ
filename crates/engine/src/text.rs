@@ -42,13 +42,10 @@ pub fn restyle(text: &str, style: &Profile) -> String {
         Capitals::Lowercase => text.to_lowercase(),
         Capitals::LowerStarts => lower_starts(&text),
     };
+    // Which period ends the dictation only shows once the session ends, so the joiner drops
+    // that one. See [`Joiner::hold_periods`].
     match style.periods {
-        Periods::Keep => text,
-        Periods::DropFinal if text.ends_with('.') && !text.ends_with("..") => {
-            text.pop();
-            text
-        }
-        Periods::DropFinal => text,
+        Periods::Keep | Periods::DropFinal => text,
         Periods::Drop => drop_periods(&text),
     }
 }
@@ -101,6 +98,11 @@ pub struct Joiner {
     mid_sentence: bool,
     /// Sentence starts get a capital. Off when the style writes them lowercase.
     capitalize: bool,
+    /// Whether the period closing a segment waits for the next segment, so the one closing the
+    /// session is never inserted.
+    hold_periods: bool,
+    /// The last segment's closing period, held back.
+    held: bool,
 }
 
 impl Joiner {
@@ -112,6 +114,8 @@ impl Joiner {
             after_text: false,
             mid_sentence: false,
             capitalize,
+            hold_periods: false,
+            held: false,
         };
         if let Some(before) = before {
             let trimmed = before.trim_end();
@@ -121,6 +125,13 @@ impl Joiner {
             });
         }
         joiner
+    }
+
+    /// Holds back the period closing each segment until another segment follows, which drops
+    /// the one closing the session.
+    pub fn hold_periods(mut self, hold: bool) -> Self {
+        self.hold_periods = hold;
+        self
     }
 
     /// What [`Joiner::join`] would give for `raw`, without moving past it. For showing a draft.
@@ -134,8 +145,13 @@ impl Joiner {
         if text.is_empty() {
             return None;
         }
-        let mut out = String::with_capacity(text.len() + 1);
-        if self.after_text && !text.starts_with(|c: char| ",.;:!?…)".contains(c)) {
+        let mut out = String::with_capacity(text.len() + 2);
+        let attached = text.starts_with(|c: char| ",.;:!?…)".contains(c));
+        // A held period gives way to punctuation the segment opens with.
+        if std::mem::take(&mut self.held) && !attached {
+            out.push('.');
+        }
+        if self.after_text && !attached {
             out.push(' ');
         }
         let mut chars = text.chars();
@@ -150,6 +166,10 @@ impl Joiner {
         }
         self.after_text = true;
         self.mid_sentence = !text.ends_with(TERMINALS);
+        if self.hold_periods && text.ends_with('.') && !text.ends_with("..") {
+            out.pop();
+            self.held = true;
+        }
         Some(out)
     }
 }
@@ -186,10 +206,9 @@ mod tests {
                 from: "my approval".into(),
                 to: "thumbs up emoji".into(),
             }],
-            periods: Periods::DropFinal,
             ..Profile::formal()
         };
-        assert_eq!(restyle("my approval.", &custom), "👍");
+        assert_eq!(restyle("my approval.", &custom), "👍.");
     }
 
     #[test]
@@ -232,7 +251,7 @@ mod tests {
         };
         assert_eq!(
             restyle("Ха-ха-ха, Токатив работает. Это NASA.", &style),
-            "хахаха, Tokativ работает. это NASA"
+            "хахаха, Tokativ работает. это NASA."
         );
         let lowercase = Profile {
             capitals: Capitals::Lowercase,
@@ -256,6 +275,19 @@ mod tests {
             restyle("Ха-ха, ну да. Встреча в 3.30.", &Profile::formal()),
             "Ха-ха, ну да. Встреча в 3.30."
         );
+    }
+
+    #[test]
+    fn only_the_period_closing_the_session_drops() {
+        let mut joiner = Joiner::new(None, true).hold_periods(true);
+        assert_eq!(joiner.join("привет.").as_deref(), Some("Привет"));
+        assert_eq!(joiner.join("сосал.").as_deref(), Some(". Сосал"));
+        assert_eq!(joiner.join("правда?").as_deref(), Some(". Правда?"));
+        assert_eq!(joiner.join("ну...").as_deref(), Some(" Ну..."));
+        assert_eq!(joiner.preview("да.").as_deref(), Some(" Да"));
+        let mut joiner = Joiner::new(None, true).hold_periods(true);
+        assert_eq!(joiner.join("one.").as_deref(), Some("One"));
+        assert_eq!(joiner.join(", two").as_deref(), Some(", two"));
     }
 
     #[test]
