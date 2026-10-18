@@ -249,6 +249,8 @@ pub struct Pill {
     pub stretch: f32,
     /// How the bars are laid out along the pill.
     pub bars: Bars,
+    /// The widest the caption grows, in logical pixels. It never grows wider than the screen.
+    pub caption_width: f32,
 }
 
 impl Default for Pill {
@@ -261,6 +263,7 @@ impl Default for Pill {
             confirm_button: true,
             stretch: 0.,
             bars: Bars::Spectrum,
+            caption_width: 520.,
         }
     }
 }

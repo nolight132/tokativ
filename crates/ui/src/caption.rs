@@ -17,8 +17,9 @@ use crate::pill;
 use crate::spring::Spring;
 use crate::text_morph::{LINE_HEIGHT, Morph, TextViewport, align};
 
-/// The caption's width, wider than the pill so a phrase has room.
-pub(crate) const WIDTH: Pixels = px(520.);
+/// The range the caption's width can be set in. It is wider than the pill so a phrase has room.
+pub(crate) const MIN_WIDTH: f32 = 280.;
+pub(crate) const MAX_WIDTH: f32 = 900.;
 /// Three readable lines in a card larger than the controls. Older lines move up out of view.
 pub(crate) const TEXT_HEIGHT: Pixels = px(72.);
 pub(crate) const PADDING_X: Pixels = px(20.);
@@ -83,18 +84,19 @@ pub struct Caption {
     beat: Option<Instant>,
 }
 
-/// Opens the caption beside a pill that sits `margin` from the `edge`, folded until the first
+/// Opens the caption beside the pill `config` places, as wide as it sets, folded until the first
 /// words arrive.
 pub fn open(
-    edge: PillEdge,
-    margin: f32,
+    config: &tokativ_config::Pill,
     display: Option<DisplayId>,
     cx: &mut gpui::App,
 ) -> anyhow::Result<WindowHandle<Caption>> {
+    let (edge, margin) = (config.edge, config.margin);
+    let wanted = px(config.caption_width.clamp(MIN_WIDTH, MAX_WIDTH));
     let width = display
         .and_then(|id| cx.find_display(id))
-        .map(|display| (display.visible_bounds().size.width - pill::SHADOW * 2.).min(WIDTH))
-        .unwrap_or(WIDTH);
+        .map(|display| (display.visible_bounds().size.width - pill::SHADOW * 2.).min(wanted))
+        .unwrap_or(wanted);
     let size = Size::new(
         width + pill::SHADOW * 2.,
         TEXT_HEIGHT + PADDING_Y * 2. + BORDER * 2. + pill::SHADOW * 2.,

@@ -241,6 +241,7 @@ enum Slot {
     Width,
     Bars,
     Caption,
+    CaptionWidth,
     CancelButton,
     ConfirmButton,
     Login,
@@ -279,6 +280,7 @@ pub struct Settings {
     threshold: Slider,
     margin: Slider,
     stretch: Slider,
+    caption_width: Slider,
     devices: Vec<tokativ_audio::InputDevice>,
     scrollbar: Entity<Scrollbar>,
     device_scrollbar: Entity<Scrollbar>,
@@ -391,6 +393,7 @@ impl Settings {
             threshold: Slider::new("threshold"),
             margin: Slider::new("margin"),
             stretch: Slider::new("stretch"),
+            caption_width: Slider::new("caption-width"),
             devices: tokativ_audio::input_devices(),
             scrollbar: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(view)),
             device_scrollbar: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(view)),
@@ -602,6 +605,7 @@ impl Settings {
                 Slot::Width,
                 Slot::Bars,
                 Slot::Caption,
+                Slot::CaptionWidth,
                 Slot::CancelButton,
                 Slot::ConfirmButton,
             ],
@@ -727,6 +731,10 @@ impl Settings {
             Slot::Position => plain("Pill position", "The edge of the screen the pill sits on."),
             Slot::Distance => plain("Distance from the edge", "The gap under or over the pill."),
             Slot::Width => plain("Pill width", "A wider pill fits more bars."),
+            Slot::CaptionWidth => plain(
+                "Caption width",
+                "The widest the caption grows. It never grows wider than the screen.",
+            ),
             Slot::Bars => plain(
                 "Bars",
                 "Low to high tones, mirrored from the middle, or the loudest in the middle.",
@@ -994,6 +1002,29 @@ impl Settings {
                             fraction,
                             (0., crate::pill::MAX_STRETCH),
                         ))
+                    },
+                    cx,
+                );
+                self.row(slot, slider, cx)
+            }
+            Slot::CaptionWidth => {
+                let range = (crate::caption::MIN_WIDTH, crate::caption::MAX_WIDTH);
+                let wide = self
+                    .caption_width
+                    .dragging
+                    .unwrap_or_else(|| fraction(config.pill.caption_width, range));
+                let pixels = value(wide, range).round();
+                let slider = self.slider(
+                    &self.caption_width,
+                    wide,
+                    format!("{pixels} px"),
+                    |this| &mut this.caption_width,
+                    |config, fraction| {
+                        config.pill.caption_width = value(
+                            fraction,
+                            (crate::caption::MIN_WIDTH, crate::caption::MAX_WIDTH),
+                        )
+                        .round()
                     },
                     cx,
                 );

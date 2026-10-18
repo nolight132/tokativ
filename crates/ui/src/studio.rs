@@ -87,11 +87,29 @@ impl Render for Grip {
 /// The arrow being held.
 /// An edge of the pill being dragged to make it wider or narrower.
 struct Resize {
+    what: Resizable,
     side: Side,
-    /// Where the pointer went down, and the stretch the pill had then.
+    /// Where the pointer went down, and the value it had then: the pill's stretch, or the
+    /// caption's width.
     from: Pixels,
     start: f32,
-    stretch: f32,
+    value: f32,
+}
+
+/// What an end can be dragged to make wider or narrower.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Resizable {
+    Pill,
+    Caption,
+}
+
+impl Resizable {
+    fn range(self) -> (f32, f32) {
+        match self {
+            Self::Pill => (0., pill::MAX_STRETCH),
+            Self::Caption => (caption::MIN_WIDTH, caption::MAX_WIDTH),
+        }
+    }
 }
 
 struct Drag {
@@ -211,19 +229,26 @@ impl Studio {
         cx.notify();
     }
 
-    fn begin_resize(&mut self, side: Side, x: Pixels, cx: &mut Context<Self>) {
-        let start = self.store.read(cx).config().pill.stretch;
+    fn begin_resize(&mut self, what: Resizable, side: Side, x: Pixels, cx: &mut Context<Self>) {
+        let pill = &self.store.read(cx).config().pill;
+        let (low, high) = what.range();
+        let start = match what {
+            Resizable::Pill => pill.stretch,
+            Resizable::Caption => pill.caption_width,
+        }
+        .clamp(low, high);
         self.resize = Some(Resize {
+            what,
             side,
             from: x,
             start,
-            stretch: start,
+            value: start,
         });
         cx.notify();
     }
 
-    /// Moves the dragged edge with the pointer. The pill stays centred, so it grows by twice
-    /// what the edge moves.
+    /// Moves the dragged edge with the pointer. The pill and the caption stay centred, so they
+    /// grow by twice what the edge moves.
     fn resize_to(&mut self, x: Pixels, cx: &mut Context<Self>) {
         let Some(resize) = &mut self.resize else {
             return;
@@ -233,7 +258,8 @@ impl Studio {
                 Side::Cancel => -2.,
                 Side::Confirm => 2.,
             };
-        resize.stretch = (resize.start + moved).clamp(0., pill::MAX_STRETCH);
+        let (low, high) = resize.what.range();
+        resize.value = (resize.start + moved).clamp(low, high);
         cx.notify();
     }
 
@@ -241,7 +267,10 @@ impl Studio {
         let Some(resize) = self.resize.take() else {
             return;
         };
-        self.edit(cx, |pill| pill.stretch = pill::snap_stretch(resize.stretch));
+        self.edit(cx, |pill| match resize.what {
+            Resizable::Pill => pill.stretch = pill::snap_stretch(resize.value),
+            Resizable::Caption => pill.caption_width = resize.value.round(),
+        });
         cx.notify();
     }
 
@@ -298,9 +327,16 @@ impl Render for Studio {
         }
         // The width glides to whole pairs of bars, even while an end is dragged.
         let stretch = match &self.resize {
-            Some(resize) => resize.stretch,
-            None => config.stretch,
+            Some(resize) if resize.what == Resizable::Pill => resize.value,
+            _ => config.stretch,
         };
+        if let Some(resize) = self
+            .resize
+            .as_ref()
+            .filter(|r| r.what == Resizable::Caption)
+        {
+            config.caption_width = resize.value;
+        }
         self.stretch.aim(pill::snap_stretch(stretch), SNAP);
         config.stretch = self.stretch.at().max(0.);
         let theme = *cx.theme();
@@ -317,7 +353,12 @@ impl Render for Studio {
         // the edge.
         let pill_height = pill::HEIGHT.as_f32();
         let gap = caption::GAP.as_f32();
-        let caption_width = caption::WIDTH.as_f32().min(stage_width - 32.).max(0.);
+        // The stage shows a caption wider than it has room for at the most it can.
+        let caption_width = config
+            .caption_width
+            .clamp(caption::MIN_WIDTH, caption::MAX_WIDTH)
+            .min(stage_width - 32.)
+            .max(0.);
         let caption_height =
             (caption::TEXT_HEIGHT + caption::PADDING_Y * 2. + caption::BORDER * 2.).as_f32();
         let group_width = caption_width.max(pill::width(true, true, config.stretch).as_f32());
@@ -659,28 +700,41 @@ impl Studio {
             .child(cancel)
             .child(confirm)
             .when(resting == 1., |this| {
-                this.child(self.grip(Side::Cancel, cx))
-                    .child(self.grip(Side::Confirm, cx))
+                this.child(self.grip(Resizable::Pill, Side::Cancel, cx))
+                    .child(self.grip(Resizable::Pill, Side::Confirm, cx))
             })
             .into_any_element()
     }
 
-    /// The strip along one end of the pill that drags that end out or in. Its handle shows on
-    /// hover and while it is dragged.
-    fn grip(&self, side: Side, cx: &mut Context<Self>) -> AnyElement {
+    /// The strip along one end of the pill or the caption that drags that end out or in. Its
+    /// handle shows on hover and while it is dragged.
+    fn grip(&self, what: Resizable, side: Side, cx: &mut Context<Self>) -> AnyElement {
         let theme = *cx.theme();
-        let (id, group) = match side {
-            Side::Cancel => ("studio-grip-left", "studio-grip-left"),
-            Side::Confirm => ("studio-grip-right", "studio-grip-right"),
+        let (id, tip) = match what {
+            Resizable::Pill => (
+                "studio-grip-pill",
+                "Drag to make the pill wider or narrower",
+            ),
+            Resizable::Caption => (
+                "studio-grip-caption",
+                "Drag to make the caption wider or narrower",
+            ),
         };
+        let group = SharedString::from(format!(
+            "{id}-{}",
+            match side {
+                Side::Cancel => "left",
+                Side::Confirm => "right",
+            }
+        ));
         let held = self
             .resize
             .as_ref()
-            .is_some_and(|resize| resize.side == side);
+            .is_some_and(|resize| resize.what == what && resize.side == side);
         let reach = px(GRIP_WIDTH / 2.);
         div()
-            .id(id)
-            .group(group)
+            .id(group.clone())
+            .group(group.clone())
             .absolute()
             .top_0()
             .bottom_0()
@@ -693,9 +747,7 @@ impl Studio {
             .items_center()
             .justify_center()
             .cursor(CursorStyle::ResizeLeftRight)
-            .when(!held, |this| {
-                this.tip_label("Drag to make the pill wider or narrower", Perch::Above)
-            })
+            .when(!held, |this| this.tip_label(tip, Perch::Above))
             .child(
                 div()
                     .w(px(3.))
@@ -708,7 +760,7 @@ impl Studio {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    this.begin_resize(side, event.position.x, cx)
+                    this.begin_resize(what, side, event.position.x, cx)
                 }),
             )
             .on_drag(Grip, |grip, _, _, cx| cx.new(|_| grip.clone()))
@@ -940,6 +992,28 @@ impl Studio {
                     )
             });
 
+        // While an end is dragged the caption reads out its width, the full one even where the
+        // stage shows less of it.
+        let dragged = self
+            .resize
+            .as_ref()
+            .filter(|resize| resize.what == Resizable::Caption)
+            .map(|resize| resize.value.round());
+        let reading = dragged.map(|wide| {
+            div()
+                .absolute()
+                .right(px(10.))
+                .bottom(px(8.))
+                .px(px(6.))
+                .h(px(BADGE_HEIGHT))
+                .flex()
+                .items_center()
+                .rounded_full()
+                .bg(theme.primary)
+                .text_color(theme.background)
+                .text_size(theme.text(Text::Tiny))
+                .child(format!("{wide} px"))
+        });
         div()
             .relative()
             .flex_none()
@@ -947,6 +1021,11 @@ impl Studio {
             .h(height)
             .when(shown < 1., |this| this.child(outline))
             .when(unfolded > 0.001, |this| this.child(bubble))
+            .children(reading)
+            .when(on && resting == 1. && shown == 1., |this| {
+                this.child(self.grip(Resizable::Caption, Side::Cancel, cx))
+                    .child(self.grip(Resizable::Caption, Side::Confirm, cx))
+            })
             .into_any_element()
     }
 
