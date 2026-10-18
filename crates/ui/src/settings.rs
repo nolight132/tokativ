@@ -1667,7 +1667,7 @@ impl Settings {
                     .find(|repository| repository.id == repo)
                     .cloned();
                 let page = format!("https://huggingface.co/{repo}");
-                let copied = page.clone();
+                let opened = page.clone();
                 let top = div()
                     .flex()
                     .flex_col()
@@ -1696,16 +1696,12 @@ impl Settings {
                                     .child(repo.clone()),
                             )
                             .child(
-                                Button::new("copy-repository-link")
-                                    .label("Copy link")
-                                    .icon("icons/copy.svg")
+                                Button::new("open-repository-link")
+                                    .label("Open link")
+                                    .icon("icons/external-link.svg")
                                     .small()
                                     .outline()
-                                    .on_click(move |_, _, cx| {
-                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                            copied.clone(),
-                                        ))
-                                    }),
+                                    .on_click(move |_, _, cx| cx.open_url(&opened)),
                             ),
                     )
                     .when_some(found.as_ref(), |this, repository| {
