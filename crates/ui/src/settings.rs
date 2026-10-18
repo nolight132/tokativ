@@ -1082,6 +1082,7 @@ impl Settings {
 
         let app_memory = Reading {
             id: "reading-app-memory",
+            place: Place::First,
             label: "App RAM",
             value: chrome::size(app),
             share: share(app, ram),
@@ -1093,6 +1094,7 @@ impl Settings {
         let cpu = self.usage.cpu;
         let app_cpu = Reading {
             id: "reading-app-cpu",
+            place: Place::Middle,
             label: "App CPU",
             value: cpu
                 .map(|cpu| format!("{cpu:.0}%"))
@@ -1105,6 +1107,7 @@ impl Settings {
         };
         let model_memory = Reading {
             id: "reading-model-memory",
+            place: Place::Last,
             label: match gpu {
                 true => "Model VRAM",
                 false => "Model RAM",
@@ -1965,6 +1968,8 @@ fn item(
 /// it takes when the whole is known, and what the whole is. `tip` explains it on hover.
 struct Reading {
     id: &'static str,
+    /// Where the reading sits in the row, so its hover shade takes the frame's outer corners.
+    place: Place,
     label: &'static str,
     value: String,
     share: Option<f32>,
@@ -1972,10 +1977,25 @@ struct Reading {
     tip: String,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Place {
+    First,
+    Middle,
+    Last,
+}
+
 fn reading(reading: Reading, cx: &App) -> AnyElement {
     let theme = cx.theme();
-    div()
-        .id(reading.id)
+    // The frame does not clip to its rounded corners, so the readings at its ends round their
+    // own outer corners to match, inside its one pixel border.
+    let corner = crate::nested_radius(chrome::GROUP_RADIUS, px(1.));
+    let shaped = div().id(reading.id);
+    let shaped = match reading.place {
+        Place::First => shaped.rounded_l(corner).squircle(),
+        Place::Last => shaped.rounded_r(corner).squircle(),
+        Place::Middle => shaped,
+    };
+    shaped
         .flex()
         .flex_col()
         .flex_1()
