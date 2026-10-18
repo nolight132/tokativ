@@ -647,7 +647,7 @@ impl Settings {
             Slot::Version => pair(
                 "Tokativ",
                 Some(format!(
-                    "Version {}. {} models installed.",
+                    "Version {}.\n{} models installed.",
                     env!("CARGO_PKG_VERSION"),
                     self.library.read(cx).installed_models().len()
                 )),
