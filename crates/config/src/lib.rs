@@ -298,7 +298,7 @@ pub struct Replacement {
 pub enum Periods {
     #[default]
     Keep,
-    /// Every period but the one closing a phrase.
+    /// Every period but the one closing the dictation.
     DropFinal,
     /// No periods at all, so sentences run on as in a chat.
     Drop,
