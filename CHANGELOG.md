@@ -7,6 +7,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- A choice of what the dictation key does, under Settings → Dictation → Shortcut: tap or hold
+  as before, toggle, where every press starts or finishes, or push to talk, where letting go
+  always finishes. How long a press lasts before it counts as holding can be set too. On Plasma
+  the section shows the key and opens System Settings to change it.
+
+### Fixed
+
+- Plasma shortcuts with several keys showed a literal `\t` between them.
+
 ## [0.5.0] - 2026-10-19
 
 ### Added

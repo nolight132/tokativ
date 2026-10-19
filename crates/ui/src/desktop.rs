@@ -197,10 +197,10 @@ fn plasma_keys(text: &str) -> Option<String> {
         let Some(value) = line.strip_prefix("dictate=").filter(|_| ours) else {
             continue;
         };
-        // Several keys for one shortcut are separated by tabs.
+        // Several keys for one shortcut are separated by tabs, which the file writes escaped.
         let keys = value.split(',').next()?.trim();
         return (!keys.is_empty() && !keys.eq_ignore_ascii_case("none"))
-            .then(|| keys.replace('\t', " or "));
+            .then(|| keys.replace("\\t", "\t").replace('\t', " or "));
     }
     None
 }
@@ -299,6 +299,10 @@ mod tests {
             None
         );
         assert_eq!(plasma_keys("[kwin]\ndictate=Meta+D,none,Other\n"), None);
+        assert_eq!(
+            plasma_keys("[tokativ]\ndictate=F13\\tMeta+Shift+D,Meta+Shift+D,Dictate\n").as_deref(),
+            Some("F13 or Meta+Shift+D")
+        );
     }
 
     #[test]

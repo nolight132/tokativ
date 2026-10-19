@@ -140,6 +140,11 @@ pub struct Config {
     /// itself, such as `alt+space`. On Linux the compositor binds a key to `tokativ press` or
     /// `tokativ hold` instead and this is unused.
     pub hotkey: String,
+    /// What a tap and a hold of the dictation key do.
+    pub key_mode: KeyMode,
+    /// How long the dictation key has to stay down for [`KeyMode::Auto`] to take the press as
+    /// push to talk, in milliseconds.
+    pub hold_ms: u32,
     /// Show a draft of the phrase being spoken at the cursor before it is final. Needs the input
     /// method.
     pub live_preview: bool,
@@ -168,6 +173,8 @@ impl Default for Config {
             tray: true,
             check_for_updates: true,
             hotkey: DEFAULT_HOTKEY.to_owned(),
+            key_mode: KeyMode::Auto,
+            hold_ms: 400,
             live_preview: true,
             setup_done: false,
             profile: Profile::formal().name,
@@ -333,6 +340,32 @@ impl Capitals {
 pub struct Replacement {
     pub from: String,
     pub to: String,
+}
+
+/// What the dictation key does when it goes down and comes up.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum KeyMode {
+    /// A tap starts a session and the next one finishes it. Holding the key past
+    /// [`Config::hold_ms`] makes it push to talk, so letting go finishes the session.
+    #[default]
+    Auto,
+    /// Every press starts or finishes a session, however long the key stays down.
+    Toggle,
+    /// The session lasts while the key is down, and letting go finishes it.
+    Hold,
+}
+
+impl KeyMode {
+    pub const ALL: [Self; 3] = [Self::Auto, Self::Toggle, Self::Hold];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "Tap or hold",
+            Self::Toggle => "Toggle",
+            Self::Hold => "Push to talk",
+        }
+    }
 }
 
 /// Which periods stay in dictated text. Question marks, exclamation marks and ellipses always
