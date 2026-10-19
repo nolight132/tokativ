@@ -2454,7 +2454,6 @@ fn title(label: &str, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// A title with its muted detail under it, filling the room left of a control.
 /// Reads the key of the shortcut Tokativ binds on its own now and every few seconds after, so a
 /// key changed in the desktop's settings shows without reopening the window.
 fn watch_own_key(cx: &mut Context<Settings>) -> Task<()> {
@@ -2483,6 +2482,7 @@ fn watch_own_key(cx: &mut Context<Settings>) -> Task<()> {
 
 /// Keys as caps, such as `Meta+Shift+D or F13`: each combination's keys joined, the
 /// combinations apart.
+#[cfg(target_os = "linux")]
 fn keycaps(keys: &str, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let small = theme.text(Text::Small);
@@ -2522,6 +2522,7 @@ fn key_mode_detail(mode: KeyMode) -> &'static str {
     }
 }
 
+/// A title with its muted detail under it, filling the room left of a control.
 fn labels(title: SharedString, detail: Option<SharedString>, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
     div()
