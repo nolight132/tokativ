@@ -7,6 +7,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- The tray icon on macOS and Windows is a microphone, and a red dot while you dictate. On macOS
+  it is sharp on Retina displays and sized like other menu bar icons.
+
 ## [0.5.0] - 2026-10-19
 
 ### Added
