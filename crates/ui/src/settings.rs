@@ -12,7 +12,7 @@ use gpui::{
     ScrollHandle, SharedString, Size, Task, UniformListScrollHandle, Window, WindowHandle, div, px,
     svg, uniform_list,
 };
-use tokativ_config::{Backend, Bars, Capitals, Config, Periods, PillEdge, Processor};
+use tokativ_config::{Backend, Bars, Capitals, Config, KeyMode, Periods, PillEdge, Processor};
 use tokativ_engine::{Hardware, ModelId};
 use ui::{
     ActiveTheme as _, Button, Entrance, Glide, Input, Menu, MenuItem, Perch, Picker, Popovers,
@@ -21,6 +21,7 @@ use ui::{
 };
 
 use crate::chrome::{self, veil};
+use crate::desktop::Desktop;
 use crate::host::{Card, Files, Host, Library, ModelState, Status, Store};
 use crate::models;
 use crate::setup::Setup;
@@ -56,6 +57,10 @@ const TITLE_WEIGHT: u32 = 2;
 /// The ranges the sliders cover.
 const SILENCE_MS: (f32, f32) = (200., 2000.);
 const THRESHOLD: (f32, f32) = (0.2, 0.9);
+/// How long a press can last before it counts as holding the key, in milliseconds.
+const HOLD_MS: (f32, f32) = (150., 1000.);
+/// How often the key Tokativ binds on its own is read again, since it is changed elsewhere.
+const OWN_KEY_POLL: std::time::Duration = std::time::Duration::from_secs(2);
 const MARGIN: (f32, f32) = (0., 240.);
 const IDLE_MINUTES: [u32; 5] = [0, 5, 15, 30, 60];
 /// How often the resources rows read the daemon's footprint.
@@ -223,6 +228,10 @@ enum Slot {
     Vocabulary,
     LiveText,
     Hotkey,
+    /// What a tap and a hold of the dictation key do.
+    KeyMode,
+    /// How long a press lasts before it is a hold, while the key mode tells them apart.
+    HoldTime,
     Microphone,
     Pause,
     Threshold,
@@ -283,6 +292,7 @@ pub struct Settings {
     popovers: Popovers,
     silence: Slider,
     threshold: Slider,
+    hold: Slider,
     margin: Slider,
     stretch: Slider,
     caption_width: Slider,
@@ -338,7 +348,11 @@ pub struct Settings {
     themes_glide: Glide,
     /// Whether the back and forward buttons over the theme cards have shown yet.
     theme_arrows_seen: [Cell<bool>; 2],
+    /// The key of the shortcut Tokativ binds on its own where the desktop lets it, as the
+    /// desktop spells it.
+    own_key: Option<String>,
     _debounce: Option<Task<()>>,
+    _own_key: Task<()>,
 }
 
 impl Settings {
@@ -396,6 +410,7 @@ impl Settings {
             popovers: Popovers::default(),
             silence: Slider::new("silence"),
             threshold: Slider::new("threshold"),
+            hold: Slider::new("hold"),
             margin: Slider::new("margin"),
             stretch: Slider::new("stretch"),
             caption_width: Slider::new("caption-width"),
@@ -435,7 +450,9 @@ impl Settings {
                 glide
             },
             theme_arrows_seen: Default::default(),
+            own_key: None,
             _debounce: None,
+            _own_key: watch_own_key(cx),
             _listing: {
                 let listing = cx.background_spawn(async { tokativ_engine::hardware() });
                 cx.spawn(async move |this, cx| {
@@ -563,26 +580,34 @@ impl Settings {
 
     /// The slots of one category, group labels included. The appearance page lists rows unless
     /// `visual` asks for its live preview.
-    fn page_slots(&self, page: Page, visual: bool, _cx: &App) -> Vec<Slot> {
+    fn page_slots(&self, page: Page, visual: bool, cx: &App) -> Vec<Slot> {
         match page {
             Page::Model => [Slot::Models, Slot::Explore, Slot::Runtime]
                 .into_iter()
                 .chain(development().then_some(Slot::Rerun))
                 .chain([Slot::Title("Vocabulary"), Slot::Vocabulary])
                 .collect(),
-            Page::Dictation => [
-                match cfg!(target_os = "linux") {
-                    true => Slot::LiveText,
-                    false => Slot::Hotkey,
-                },
-                Slot::Microphone,
-                Slot::Title("Voice detection"),
-                Slot::Pause,
-                Slot::Threshold,
-                Slot::Title("Typing"),
-                Slot::Method,
-            ]
-            .to_vec(),
+            Page::Dictation => [Slot::Microphone]
+                .into_iter()
+                .chain(cfg!(target_os = "linux").then_some(Slot::LiveText))
+                .chain([Slot::Title("Shortcut")])
+                .chain(
+                    (!cfg!(target_os = "linux") || Desktop::detect().own_shortcut())
+                        .then_some(Slot::Hotkey),
+                )
+                .chain([Slot::KeyMode])
+                .chain(
+                    (self.store.read(cx).config().key_mode == KeyMode::Auto)
+                        .then_some(Slot::HoldTime),
+                )
+                .chain([
+                    Slot::Title("Voice detection"),
+                    Slot::Pause,
+                    Slot::Threshold,
+                    Slot::Title("Typing"),
+                    Slot::Method,
+                ])
+                .collect(),
             Page::Style => vec![
                 Slot::Profiles,
                 Slot::ProfileTitle,
@@ -690,7 +715,21 @@ impl Settings {
                 "Live text",
                 "A draft at the cursor while you speak. Needs the input method.",
             ),
+            #[cfg(not(target_os = "linux"))]
             Slot::Hotkey => plain("Hotkey", "Starts a session and finishes it."),
+            #[cfg(target_os = "linux")]
+            Slot::Hotkey => plain(
+                "Dictation key",
+                "Changed under System Settings → Shortcuts.",
+            ),
+            Slot::KeyMode => plain(
+                "Key behavior",
+                key_mode_detail(self.store.read(cx).config().key_mode),
+            ),
+            Slot::HoldTime => plain(
+                "Hold after",
+                "A press longer than this is push to talk, a shorter one a tap.",
+            ),
             Slot::Microphone => plain("Microphone", "The input sessions listen to."),
             Slot::Pause => plain("Pause length", "How long a silence ends a phrase."),
             Slot::Threshold => plain(
@@ -840,7 +879,63 @@ impl Settings {
             #[cfg(not(target_os = "linux"))]
             Slot::Hotkey => self.row(slot, self.hotkey.clone(), cx),
             #[cfg(target_os = "linux")]
-            Slot::Hotkey => div().into_any_element(),
+            Slot::Hotkey => {
+                let change = Button::new("change-key")
+                    .label("Change")
+                    .small()
+                    .outline()
+                    .on_click(|_, _, _| Desktop::detect().open_shortcuts());
+                let keys = match &self.own_key {
+                    Some(keys) => keycaps(keys, cx),
+                    None => div()
+                        .text_size(cx.theme().text(Text::Small))
+                        .text_color(cx.theme().muted_foreground)
+                        .child("No key")
+                        .into_any_element(),
+                };
+                let action = div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(keys)
+                    .child(change);
+                self.row(slot, action, cx)
+            }
+            Slot::KeyMode => {
+                let mode = config.key_mode;
+                let picker = Picker::new("key-mode", &self.popovers, mode.name())
+                    .width(Picker::REGULAR)
+                    .items(KeyMode::ALL.into_iter().map(|choice| {
+                        MenuItem::new(
+                            SharedString::from(format!("key-mode-{choice:?}")),
+                            choice.name(),
+                        )
+                        .selected(choice == mode)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.edit(cx, |config| config.key_mode = choice);
+                        }))
+                    }));
+                self.row(slot, picker, cx)
+            }
+            Slot::HoldTime => {
+                let hold = self
+                    .hold
+                    .dragging
+                    .unwrap_or_else(|| fraction(config.hold_ms as f32, HOLD_MS));
+                // Whole tens of milliseconds, since finer steps cannot be told apart by hand.
+                let ms = (value(hold, HOLD_MS) / 10.).round() as u32 * 10;
+                let slider = self.slider(
+                    &self.hold,
+                    hold,
+                    format!("{ms} ms"),
+                    |this| &mut this.hold,
+                    |config, fraction| {
+                        config.hold_ms = (value(fraction, HOLD_MS) / 10.).round() as u32 * 10
+                    },
+                    cx,
+                );
+                self.row(slot, slider, cx)
+            }
             Slot::Microphone => self.microphone(config, cx),
             Slot::Pause => {
                 let silence = self
@@ -2360,6 +2455,73 @@ fn title(label: &str, cx: &App) -> AnyElement {
 }
 
 /// A title with its muted detail under it, filling the room left of a control.
+/// Reads the key of the shortcut Tokativ binds on its own now and every few seconds after, so a
+/// key changed in the desktop's settings shows without reopening the window.
+fn watch_own_key(cx: &mut Context<Settings>) -> Task<()> {
+    let desktop = Desktop::detect();
+    if !desktop.own_shortcut() {
+        return Task::ready(());
+    }
+    cx.spawn(async move |this, cx| {
+        loop {
+            let keys = cx
+                .background_spawn(async move { desktop.bound().map(|bound| bound.keys) })
+                .await;
+            let alive = this.update(cx, |this, cx| {
+                if this.own_key != keys {
+                    this.own_key = keys;
+                    cx.notify();
+                }
+            });
+            if alive.is_err() {
+                return;
+            }
+            cx.background_executor().timer(OWN_KEY_POLL).await;
+        }
+    })
+}
+
+/// Keys as caps, such as `Meta+Shift+D or F13`: each combination's keys joined, the
+/// combinations apart.
+fn keycaps(keys: &str, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let small = theme.text(Text::Small);
+    let cap = |key: &str| {
+        div()
+            .px_1p5()
+            .py_0p5()
+            .rounded(theme.radius * 0.75)
+            .border_1()
+            .border_b_2()
+            .border_color(theme.border)
+            .bg(theme.secondary)
+            .text_size(small)
+            .child(key.to_owned())
+    };
+    let or = || {
+        div()
+            .text_size(small)
+            .text_color(theme.muted_foreground)
+            .child("or")
+    };
+    let mut row = div().flex().items_center().gap_1();
+    for (index, combination) in keys.split(" or ").enumerate() {
+        if index > 0 {
+            row = row.child(or());
+        }
+        row = row.children(combination.split('+').map(cap));
+    }
+    row.into_any_element()
+}
+
+fn key_mode_detail(mode: KeyMode) -> &'static str {
+    match mode {
+        KeyMode::Auto => "Tap to start and tap to finish, or hold while you talk.",
+        KeyMode::Toggle => "Each press starts or finishes, however long it lasts.",
+        KeyMode::Hold => "Listens while the key is down and finishes when you let go.",
+    }
+}
+
 fn labels(title: SharedString, detail: Option<SharedString>, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
     div()

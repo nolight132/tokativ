@@ -9,7 +9,7 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gpui::{App, AppContext as _, AsyncApp, Context, Entity, KeyBinding, QuitMode, WindowHandle};
 use notify::{RecursiveMode, Watcher as _};
 use tokativ_audio::{Levels, Options, Recorder, Silero, SpeechDetector, Timing};
-use tokativ_config::{Capitals, Config, Periods, config_dir, config_path, socket_path};
+use tokativ_config::{Capitals, Config, KeyMode, Periods, config_dir, config_path, socket_path};
 use tokativ_engine::{Joiner, ModelId, Transcriber, restyle};
 use tokativ_input::{Inserter, Key, Method};
 use tokativ_ui::{Action, Caption, Host, Library, Phase, Pill, Status, Store};
@@ -27,9 +27,6 @@ const PLACEHOLDER: &str = "…";
 const DRAFT_EVERY: Duration = Duration::from_millis(600);
 /// How often the daemon looks whether a model finished loading on some device.
 const DEVICE_POLL: Duration = Duration::from_secs(2);
-/// How long the dictation key has to stay down for letting go of it to finish the session it
-/// started. A shorter press is a tap, which leaves the session running until the next one.
-const HOLD: Duration = Duration::from_millis(400);
 /// How long after a press the first key repeat of a held key can arrive. It covers the repeat
 /// delay compositors default to, which is 600 ms in niri.
 const FIRST_REPEAT: Duration = Duration::from_secs(1);
@@ -73,8 +70,8 @@ impl Placed {
     }
 }
 
-/// The dictation key since its last press, until it is let go. Holding the key past [`HOLD`]
-/// makes it push to talk, so letting go finishes the session that press started.
+/// The dictation key since its last press, until it is let go. Whether letting go finishes the
+/// session that press started follows [`KeyMode`].
 struct Held {
     /// The session the press started. `None` when the press confirmed or restarted one instead,
     /// which letting go leaves alone.
@@ -449,37 +446,61 @@ impl Daemon {
         });
     }
 
-    /// The dictation key came up. A session it started finishes if the key was held long enough
-    /// to be push to talk. After a tap the session keeps listening.
+    /// The dictation key came up. A session it started finishes when the key mode makes the
+    /// press push to talk: always in [`KeyMode::Hold`], and in [`KeyMode::Auto`] once the key
+    /// was held long enough. After a tap in auto, and in [`KeyMode::Toggle`], it keeps listening.
     fn release(&mut self, cx: &mut Context<Self>) {
-        if let Some(held) = self.held.take()
-            && held.pressed.elapsed() >= HOLD
-        {
+        let Some(held) = self.held.take() else {
+            return;
+        };
+        let config = self.store.read(cx).config();
+        let push = match config.key_mode {
+            KeyMode::Auto => held.pressed.elapsed() >= Duration::from_millis(config.hold_ms.into()),
+            KeyMode::Toggle => false,
+            KeyMode::Hold => true,
+        };
+        if push {
             self.let_go(held, cx);
         }
     }
 
     /// A key repeat of a binding that repeats while held. Repeats keep the key down, and a
     /// timer lets go of it once they stop. A repeat too late to belong to the last press is a
-    /// new press.
+    /// new press. Such a binding shows a tap only by never repeating, so in [`KeyMode::Hold`]
+    /// the first press is let go of too when no repeat follows it.
     fn repeat(&mut self, cx: &mut Context<Self>) {
         let now = Instant::now();
-        let Some(held) = self.held.as_mut().filter(|held| match held.repeated {
+        let held = self.held.as_mut().filter(|held| match held.repeated {
             None => now - held.pressed < FIRST_REPEAT,
             Some(last) => now - last < REPEAT_GAP,
-        }) else {
-            self.press(cx);
-            return;
+        });
+        let mode = self.store.read(cx).config().key_mode;
+        let (stamp, wait) = match held {
+            Some(held) => {
+                held.repeated = Some(now);
+                (now, REPEAT_GAP)
+            }
+            None => {
+                self.press(cx);
+                let Some(held) = self.held.as_ref().filter(|_| mode == KeyMode::Hold) else {
+                    return;
+                };
+                (held.pressed, FIRST_REPEAT)
+            }
         };
-        held.repeated = Some(now);
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(REPEAT_GAP).await;
+            cx.background_executor().timer(wait).await;
             this.update(cx, |this, cx| {
                 let quiet = this
                     .held
                     .as_ref()
-                    .is_some_and(|held| held.repeated == Some(now));
-                if quiet && let Some(held) = this.held.take() {
+                    .is_some_and(|held| held.repeated.unwrap_or(held.pressed) == stamp);
+                if !quiet {
+                    return;
+                }
+                let held = this.held.take();
+                let toggle = this.store.read(cx).config().key_mode == KeyMode::Toggle;
+                if let Some(held) = held.filter(|_| !toggle) {
                     this.let_go(held, cx);
                 }
             })

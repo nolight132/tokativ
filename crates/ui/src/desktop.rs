@@ -3,6 +3,27 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+/// How soon a second start of System Settings exits once it handed its page to the window
+/// already open. One that runs longer opened a window of its own.
+const HANDOVER: Duration = Duration::from_secs(5);
+
+/// Brings System Settings to the current desktop and in front, as a KWin script, which KWin
+/// lets take focus where a program asking for it could not.
+#[cfg(target_os = "linux")]
+const RAISE_SYSTEM_SETTINGS: &str = r#"
+for (const window of workspace.windowList()) {
+    if (window.resourceClass !== "systemsettings") {
+        continue;
+    }
+    if (window.desktops.length > 0 && !window.desktops.includes(workspace.currentDesktop)) {
+        window.desktops = [workspace.currentDesktop];
+    }
+    window.minimized = false;
+    workspace.activeWindow = window;
+}
+"#;
 
 /// The compositor or desktop environment of this session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,12 +157,30 @@ impl Desktop {
         if self != Self::Plasma {
             return;
         }
-        if let Err(error) = std::process::Command::new("systemsettings")
+        let mut child = match std::process::Command::new("systemsettings")
             .arg("kcm_keys")
             .spawn()
         {
-            log::error!("setup: cannot open the shortcut settings: {error}");
-        }
+            Ok(child) => child,
+            Err(error) => {
+                log::error!("setup: cannot open the shortcut settings: {error}");
+                return;
+            }
+        };
+        let started = Instant::now();
+        // System Settings runs once. Starting it again hands the page to the window already open
+        // and exits, and KWin leaves that window where it is, behind others or on another
+        // desktop, since nothing gave it leave to take focus. A KWin script may raise it.
+        std::thread::spawn(move || {
+            let handed_over =
+                child.wait().is_ok_and(|status| status.success()) && started.elapsed() < HANDOVER;
+            #[cfg(target_os = "linux")]
+            if handed_over && let Err(error) = raise_system_settings() {
+                log::warn!("setup: cannot bring System Settings forward: {error:#}");
+            }
+            #[cfg(not(target_os = "linux"))]
+            let _ = handed_over;
+        });
     }
 
     /// Looks through the desktop's config files for a line that starts dictation: `tokativ toggle`,
@@ -177,6 +216,44 @@ impl Desktop {
     }
 }
 
+/// Runs [`RAISE_SYSTEM_SETTINGS`] through KWin's scripting service.
+#[cfg(target_os = "linux")]
+fn raise_system_settings() -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    use zbus::blocking::{Connection, Proxy};
+
+    const PLUGIN: &str = "tokativ-raise-system-settings";
+    let file = dirs::runtime_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(format!("{PLUGIN}.js"));
+    fs::write(&file, RAISE_SYSTEM_SETTINGS).context("writing the script")?;
+    let bus = Connection::session().context("connecting to the session bus")?;
+    let scripting = Proxy::new(&bus, "org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting")
+        .context("reaching KWin's scripting")?;
+    // A script left from an earlier run would keep the name taken.
+    let _: bool = scripting
+        .call("unloadScript", &(PLUGIN,))
+        .context("unloading the last script")?;
+    let id: i32 = scripting
+        .call("loadScript", &(file.to_string_lossy().as_ref(), PLUGIN))
+        .context("loading the script")?;
+    let script = Proxy::new(
+        &bus,
+        "org.kde.KWin",
+        format!("/Scripting/Script{id}"),
+        "org.kde.kwin.Script",
+    )
+    .context("reaching the script")?;
+    script
+        .call_method("run", &())
+        .context("running the script")?;
+    script
+        .call_method("stop", &())
+        .context("stopping the script")?;
+    fs::remove_file(&file).ok();
+    Ok(())
+}
+
 /// The key of Tokativ's Dictate shortcut as kglobalaccel saved it, in a line such as
 /// `dictate=Meta+Shift+D,Meta+Shift+D,Dictate` under `[tokativ]`: the keys in use, the default
 /// and the name.
@@ -197,10 +274,10 @@ fn plasma_keys(text: &str) -> Option<String> {
         let Some(value) = line.strip_prefix("dictate=").filter(|_| ours) else {
             continue;
         };
-        // Several keys for one shortcut are separated by tabs.
+        // Several keys for one shortcut are separated by tabs, which the file writes escaped.
         let keys = value.split(',').next()?.trim();
         return (!keys.is_empty() && !keys.eq_ignore_ascii_case("none"))
-            .then(|| keys.replace('\t', " or "));
+            .then(|| keys.replace("\\t", "\t").replace('\t', " or "));
     }
     None
 }
@@ -299,6 +376,10 @@ mod tests {
             None
         );
         assert_eq!(plasma_keys("[kwin]\ndictate=Meta+D,none,Other\n"), None);
+        assert_eq!(
+            plasma_keys("[tokativ]\ndictate=F13\\tMeta+Shift+D,Meta+Shift+D,Dictate\n").as_deref(),
+            Some("F13 or Meta+Shift+D")
+        );
     }
 
     #[test]
