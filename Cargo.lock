@@ -7270,6 +7270,7 @@ dependencies = [
  "wayland-protocols",
  "wayland-protocols-plasma",
  "windows-sys 0.61.2",
+ "zbus",
 ]
 
 [[package]]
