@@ -11,6 +11,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - The tray icon on macOS and Windows is a microphone, and a red dot while you dictate. On macOS
   it is sharp on Retina displays and sized like other menu bar icons.
+- App CPU in Settings → Resources is a share of all the processor's cores, not of one core.
 
 ## [0.5.0] - 2026-10-19
 

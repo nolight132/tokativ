@@ -1519,12 +1519,15 @@ impl Settings {
             place: Place::Middle,
             label: "App CPU",
             value: cpu
-                .map(|cpu| format!("{cpu:.0}%"))
+                .map(|cpu| match cpu < 10. {
+                    true => format!("{cpu:.1}%"),
+                    false => format!("{cpu:.0}%"),
+                })
                 .unwrap_or_else(|| "…".to_owned()),
             share: cpu.map(|cpu| cpu / 100.),
-            of: "of one core".to_owned(),
-            tip: "How busy Tokativ keeps the processor, as a share of one core. It rises while \
-                  you speak and the model listens."
+            of: "of all cores".to_owned(),
+            tip: "How busy Tokativ keeps the processor, as a share of all its cores. It rises \
+                  while you speak and the model listens."
                 .to_owned(),
         };
         let model_memory = Reading {

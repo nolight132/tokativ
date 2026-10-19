@@ -1,6 +1,7 @@
 //! How much memory and processor time the daemon takes, for the settings window. Linux reads
 //! `/proc`, other systems ask their own process APIs.
 
+use std::thread;
 use std::time::Instant;
 
 /// One reading of the daemon's footprint.
@@ -8,8 +9,8 @@ use std::time::Instant;
 pub struct Usage {
     /// Resident memory in bytes. Mostly the loaded models.
     pub memory: u64,
-    /// Processor time since the previous reading, as a percentage of one core. `None` on the
-    /// first reading, which has nothing to compare against.
+    /// Processor time since the previous reading, as a percentage of every core together.
+    /// `None` on the first reading, which has nothing to compare against.
     pub cpu: Option<f32>,
 }
 
@@ -26,7 +27,8 @@ impl Sampler {
         let cpu = match (self.last, used) {
             (Some((then, before)), Some(used)) => {
                 let seconds = now.duration_since(then).as_secs_f32();
-                (seconds > 0.).then(|| (used - before).max(0.) / seconds * 100.)
+                let cores = thread::available_parallelism().map_or(1, |cores| cores.get());
+                (seconds > 0.).then(|| (used - before).max(0.) / seconds / cores as f32 * 100.)
             }
             _ => None,
         };
