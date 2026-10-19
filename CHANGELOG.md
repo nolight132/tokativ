@@ -7,6 +7,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-19
+
 ### Added
 
 - A choice of what the dictation key does, under Settings → Dictation → Shortcut: tap or hold
@@ -23,6 +25,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - Plasma shortcuts with several keys showed a literal `\t` between them.
+- On Plasma the button that opens System Settings did nothing when System Settings was already
+  open behind other windows. It now brings that window forward.
 
 ## [0.5.0] - 2026-10-19
 
@@ -195,7 +199,8 @@ focused app as you speak.
 - A tray icon and a `tokativ` command line control the daemon.
 - The Home Manager module runs Tokativ as a user service and can fetch models at build time.
 
-[unreleased]: https://github.com/nolight132/tokativ/compare/v0.5.0...HEAD
+[unreleased]: https://github.com/nolight132/tokativ/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/nolight132/tokativ/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/nolight132/tokativ/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/nolight132/tokativ/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/nolight132/tokativ/compare/v0.3.0...v0.3.1

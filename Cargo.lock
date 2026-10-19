@@ -7143,7 +7143,7 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "tokativ"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -7176,7 +7176,7 @@ dependencies = [
 
 [[package]]
 name = "tokativ-audio"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
@@ -7192,7 +7192,7 @@ dependencies = [
 
 [[package]]
 name = "tokativ-config"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
@@ -7203,7 +7203,7 @@ dependencies = [
 
 [[package]]
 name = "tokativ-engine"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "cc",
@@ -7222,7 +7222,7 @@ dependencies = [
 
 [[package]]
 name = "tokativ-input"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -7244,7 +7244,7 @@ dependencies = [
 
 [[package]]
 name = "tokativ-ui"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "cpu-time",
@@ -7276,7 +7276,7 @@ dependencies = [
 
 [[package]]
 name = "tokativ-updater"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
