@@ -7160,6 +7160,7 @@ dependencies = [
  "notify",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
+ "resvg",
  "tokativ-audio",
  "tokativ-config",
  "tokativ-engine",

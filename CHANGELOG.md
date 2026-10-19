@@ -14,6 +14,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   always finishes. How long a press lasts before it counts as holding can be set too. On Plasma
   the section shows the key and opens System Settings to change it.
 
+### Changed
+
+- The tray icon on macOS and Windows is a microphone, and a red dot while you dictate. On macOS
+  it is sharp on Retina displays and sized like other menu bar icons.
+
 ### Fixed
 
 - Plasma shortcuts with several keys showed a literal `\t` between them.
