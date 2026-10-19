@@ -74,6 +74,7 @@ pub(crate) type KeyHandler = Box<dyn Fn(Key) + Send>;
 /// What the worker shares with the [`Inserter`].
 pub(crate) struct Shared {
     /// The text left of the cursor in the focused field, when the input method knows it.
+    #[cfg(target_os = "linux")]
     pub before: Arc<Mutex<Option<String>>>,
     pub status: Arc<Mutex<Status>>,
 }
@@ -83,6 +84,7 @@ impl Shared {
         *self.status.lock().expect("status lock") = status;
     }
 
+    #[cfg(target_os = "linux")]
     pub fn set_before(&self, before: Option<String>) {
         *self.before.lock().expect("before lock") = before;
     }
@@ -130,6 +132,7 @@ impl Inserter {
             note: None,
         }));
         let shared = Shared {
+            #[cfg(target_os = "linux")]
             before: before.clone(),
             status: status.clone(),
         };
