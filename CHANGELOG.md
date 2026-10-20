@@ -7,6 +7,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- A size for the pill and the caption, from 75% to 150%, under Settings → Appearance. The
+  preview follows the slider as it moves.
+
+### Changed
+
+- The preview in Settings → Appearance keeps its height while the arrow is held. It is always
+  as tall as a 16:9 monitor drawn across it, so nothing below it moves.
+
 ## [0.6.0] - 2026-10-19
 
 ### Added

@@ -27,16 +27,20 @@ use crate::screen::{self, Screen};
 use crate::spring::Spring;
 use crate::text_morph::{FONT_SIZE, LINE_HEIGHT};
 
+/// The shortest the stage gets, in a window too narrow for a wide monitor to need more.
 const STAGE_HEIGHT: f32 = 280.;
-/// The room between the pill and the stage's edge, which the arrow sits in.
+/// The least room between the group and either edge of the stage. The arrow sits in the room on
+/// the pill's side.
 const ARROW_ROOM: f32 = 64.;
 const ARROW_WIDTH: f32 = 120.;
 /// How far the arrow's line stops short of the pill and of the stage's edge.
 const ARROW_INSET: f32 = 6.;
 /// How far the drawn monitor keeps from the stage's sides.
 const SCREEN_INSET: f32 = 20.;
-/// The tallest the drawn monitor grows. A landscape monitor fills the stage's width, and one
-/// turned upright stops at this height.
+/// The stage is always as tall as a 16:9 monitor drawn across its width needs, up to this
+/// height, so it keeps its size when the pill drops onto the monitor. Monitors of another shape
+/// fit inside it.
+const STAGE_ASPECT: f32 = 16. / 9.;
 const SCREEN_HEIGHT: f32 = 440.;
 const SCREEN_RADIUS: f32 = 8.;
 /// The share of the drop over which the stage's own parts fade out, and the point after which
@@ -94,6 +98,8 @@ struct Resize {
     from: Pixels,
     start: f32,
     value: f32,
+    /// The size the pill is drawn at, which the pointer's motion is divided by.
+    size: f32,
 }
 
 /// What an end can be dragged to make wider or narrower.
@@ -118,6 +124,8 @@ struct Drag {
     locked: bool,
     /// The pill's top on the monitor, in logical pixels.
     top: f32,
+    /// The pill's height on the monitor, at the size it is drawn.
+    pill: f32,
     /// The pointer where it was last seen, for following it when it is not locked.
     pointer: Point<Pixels>,
 }
@@ -139,6 +147,8 @@ pub struct Studio {
     place: Spring,
     /// The stage's width as last laid out.
     stage: Rc<Cell<f32>>,
+    /// The size the settings' slider is being dragged to, shown before it is saved.
+    sizing: Rc<Cell<Option<f32>>>,
     drag: Option<Drag>,
     resize: Option<Resize>,
 }
@@ -173,6 +183,7 @@ impl Studio {
             confirm: landed(SLIDE, config.confirm_button),
             place: Spring::new(DROP),
             stage: Rc::new(Cell::new(0.)),
+            sizing: Rc::new(Cell::new(None)),
             drag: None,
             resize: None,
         }
@@ -188,15 +199,29 @@ impl Studio {
         self.screen.unwrap_or(Screen::FALLBACK)
     }
 
+    /// Where the settings put the size their slider is being dragged to, for the preview to
+    /// follow it.
+    pub fn sizing(&self) -> Rc<Cell<Option<f32>>> {
+        self.sizing.clone()
+    }
+
+    /// How large the pill and the caption are drawn: as the slider is being dragged, or as
+    /// `config` sets.
+    fn size(&self, config: &PillConfig) -> f32 {
+        pill::size(self.sizing.get().unwrap_or(config.size))
+    }
+
     /// Holds the pointer and drops the pill onto the monitor.
     fn begin(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let config = &self.store.read(cx).config().pill;
         let height = self.screen().size.height.as_f32();
-        let top = top_of(config.edge, config.margin, height);
+        let pill = pill::HEIGHT.as_f32() * self.size(config);
+        let top = top_of(config.edge, config.margin, height, pill);
         self.drag = Some(Drag {
             grab: Grab::start(window),
             locked: false,
             top,
+            pill,
             pointer: event.position,
         });
         cx.hide_cursor();
@@ -210,7 +235,11 @@ impl Studio {
         let Some(drag) = self.drag.as_mut().filter(|drag| !drag.locked) else {
             return;
         };
-        drag.top = clamp_top(drag.top + (position.y - drag.pointer.y).as_f32(), height);
+        drag.top = clamp_top(
+            drag.top + (position.y - drag.pointer.y).as_f32(),
+            height,
+            drag.pill,
+        );
         drag.pointer = position;
         cx.notify();
     }
@@ -220,7 +249,7 @@ impl Studio {
         let Some(drag) = self.drag.take() else {
             return;
         };
-        let (edge, margin) = placement(drag.top, self.screen().size.height.as_f32());
+        let (edge, margin) = placement(drag.top, self.screen().size.height.as_f32(), drag.pill);
         self.edit(cx, |pill| {
             pill.edge = edge;
             pill.margin = margin;
@@ -231,6 +260,7 @@ impl Studio {
 
     fn begin_resize(&mut self, what: Resizable, side: Side, x: Pixels, cx: &mut Context<Self>) {
         let pill = &self.store.read(cx).config().pill;
+        let size = self.size(pill);
         let (low, high) = what.range();
         let start = match what {
             Resizable::Pill => pill.stretch,
@@ -243,6 +273,7 @@ impl Studio {
             from: x,
             start,
             value: start,
+            size,
         });
         cx.notify();
     }
@@ -253,7 +284,7 @@ impl Studio {
         let Some(resize) = &mut self.resize else {
             return;
         };
-        let moved = (x - resize.from).as_f32()
+        let moved = (x - resize.from).as_f32() / resize.size
             * match resize.side {
                 Side::Cancel => -2.,
                 Side::Confirm => 2.,
@@ -282,7 +313,7 @@ impl Studio {
         };
         if let Some(moved) = drag.grab.moved() {
             drag.locked = true;
-            drag.top = clamp_top(drag.top + moved.y, height);
+            drag.top = clamp_top(drag.top + moved.y, height, drag.pill);
         }
     }
 
@@ -323,7 +354,7 @@ impl Render for Studio {
         let screen = self.screen();
         let screen_height = screen.size.height.as_f32();
         if let Some(drag) = &self.drag {
-            (config.edge, config.margin) = placement(drag.top, screen_height);
+            (config.edge, config.margin) = placement(drag.top, screen_height, drag.pill);
         }
         // The width glides to whole pairs of bars, even while an end is dragged.
         let stretch = match &self.resize {
@@ -350,14 +381,15 @@ impl Render for Studio {
         let held = self.drag.is_some();
 
         // The pill and the caption go together as one group, the caption on the side away from
-        // the edge.
+        // the edge. The group is measured at the usual size and drawn `size` times that.
+        let size = self.size(&config);
         let pill_height = pill::HEIGHT.as_f32();
         let gap = caption::GAP.as_f32();
         // The stage shows a caption wider than it has room for at the most it can.
         let caption_width = config
             .caption_width
             .clamp(caption::MIN_WIDTH, caption::MAX_WIDTH)
-            .min(stage_width - 32.)
+            .min((stage_width - 32.) / size)
             .max(0.);
         let caption_height =
             (caption::TEXT_HEIGHT + caption::PADDING_Y * 2. + caption::BORDER * 2.).as_f32();
@@ -365,37 +397,51 @@ impl Render for Studio {
         let group_height = pill_height + gap + caption_height;
         let bottom = config.edge == PillEdge::Bottom;
 
-        // At rest the pill sits towards its edge of the stage, with the arrow between them.
+        // Its rectangle sits on whole pixels, so the frame lands there with nothing to snap.
+        let grid = |value: f32| ui::snapped(px(value), window).as_f32();
+        let wide_height =
+            ((stage_width - SCREEN_INSET * 2.) / STAGE_ASPECT).clamp(1., SCREEN_HEIGHT);
+        let stage_height = STAGE_HEIGHT
+            .max(grid(wide_height) + SCREEN_INSET * 2.)
+            .max(grid(group_height * size) + ARROW_ROOM * 2.);
+
+        // At rest the group sits in the middle of the stage, with the arrow from the pill to its
+        // edge.
+        let arrow_room = (stage_height - group_height * size) / 2.;
         let rest_pill_top = match bottom {
-            true => STAGE_HEIGHT - ARROW_ROOM - pill_height,
-            false => ARROW_ROOM,
+            true => stage_height - arrow_room - pill_height * size,
+            false => arrow_room,
         };
         // From the pill's middle to the group's.
         let to_group = (group_height - pill_height) / 2. * if bottom { -1. } else { 1. };
         let rest = point(
             stage_width / 2.,
-            rest_pill_top + pill_height / 2. + to_group,
+            rest_pill_top + (pill_height / 2. + to_group) * size,
         );
 
-        // The monitor fills the stage's width, and the stage grows to fit it. On the monitor
-        // everything shrinks to its scale.
+        // The monitor is as large as fits on the stage. On the monitor everything shrinks to its
+        // scale.
         let aspect = screen.size.width.as_f32() / screen_height;
-        // Its rectangle sits on whole pixels, so the frame lands there with nothing to snap.
-        let grid = |value: f32| ui::snapped(px(value), window).as_f32();
-        let monitor_height =
-            grid(((stage_width - SCREEN_INSET * 2.) / aspect).clamp(1., SCREEN_HEIGHT));
+        let monitor_height = grid(
+            ((stage_width - SCREEN_INSET * 2.) / aspect)
+                .min(stage_height - SCREEN_INSET * 2.)
+                .max(1.),
+        );
         let monitor_width = grid(monitor_height * aspect);
-        let placed_height = STAGE_HEIGHT.max(monitor_height + SCREEN_INSET * 2.);
-        let stage_height = lerp(STAGE_HEIGHT, placed_height, placing);
         let monitor = point(
             grid((stage_width - monitor_width) / 2.),
-            grid((placed_height - monitor_height) / 2.),
+            grid((stage_height - monitor_height) / 2.),
         );
         let scale = monitor_height / screen_height;
-        let pill_top = top_of(config.edge, config.margin, screen_height);
+        let pill_top = top_of(
+            config.edge,
+            config.margin,
+            screen_height,
+            pill_height * size,
+        );
         let placed = point(
             monitor.x + monitor_width / 2.,
-            monitor.y + (pill_top + pill_height / 2. + to_group) * scale,
+            monitor.y + (pill_top + (pill_height / 2. + to_group) * size) * scale,
         );
 
         // The group's corner rests on a whole pixel at both ends of the drop, so nothing is
@@ -408,13 +454,13 @@ impl Render for Studio {
         };
         let nudge = point(
             lerp(
-                on_grid(rest.x, group_width + shadow * 2.),
-                on_grid(placed.x, (group_width + shadow * 2.) * scale),
+                on_grid(rest.x, (group_width + shadow * 2.) * size),
+                on_grid(placed.x, (group_width + shadow * 2.) * size * scale),
                 placing,
             ),
             lerp(
-                on_grid(rest.y, group_height + shadow * 2.),
-                on_grid(placed.y, (group_height + shadow * 2.) * scale),
+                on_grid(rest.y, (group_height + shadow * 2.) * size),
+                on_grid(placed.y, (group_height + shadow * 2.) * size * scale),
                 placing,
             ),
         );
@@ -422,13 +468,13 @@ impl Render for Studio {
             lerp(rest.x, placed.x, placing) + nudge.x,
             lerp(rest.y, placed.y, placing) + nudge.y,
         );
-        let group_scale = lerp(1., scale, placing).max(0.01);
+        let group_scale = lerp(size, size * scale, placing).max(0.01);
         // Laid out at a step near its drawn scale, and shrunk the rest of the way as one layer.
         // Compositor layers resample what they hold, so they are on only while the drop moves,
         // and anything resting, on the stage or on the monitor, is drawn plainly.
         let dropping = !self.place.settled();
         let level = match dropping {
-            true => layout_scale(group_scale, scale, self.place.target == 1.),
+            true => layout_scale(group_scale / size, scale, self.place.target == 1.) * size,
             false => group_scale,
         };
         let presented = group_scale / level;
@@ -437,7 +483,7 @@ impl Render for Studio {
         let frame_left = lerp(0., monitor.x, placing);
         let frame_top = lerp(0., monitor.y, placing);
         let frame_width = lerp(grid(stage_width), monitor_width, placing);
-        let frame_height = lerp(STAGE_HEIGHT, monitor_height, placing);
+        let frame_height = lerp(stage_height, monitor_height, placing);
         let shown = placing.clamp(0., 1.);
         let frame_radius = px(lerp(chrome::GROUP_RADIUS.as_f32(), SCREEN_RADIUS, shown));
         let moving_frame = dropping;
@@ -558,7 +604,11 @@ impl Render for Studio {
             .child(pill_row)
             .child(caption);
 
-        let arrow = self.arrow(&config, rest_pill_top, early, held, cx);
+        let arrow_top = match bottom {
+            true => rest_pill_top + pill_height * size,
+            false => 0.,
+        };
+        let arrow = self.arrow(&config, arrow_top, arrow_room, early, held, cx);
         let layouts = self.layouts(config.bars, early, cx);
 
         let stage_size = self.stage.clone();
@@ -587,16 +637,10 @@ impl Render for Studio {
             .child(arrow)
             .child(layouts);
 
-        let hint = match held {
-            false => {
-                "Click the buttons or the caption to hide or show them. Hold the arrow and move \
-                 the mouse to set the distance from the edge."
-            }
-            true => {
-                "Move the mouse up or down as if over your screen. Past the middle the pill goes \
-                 to the other edge."
-            }
-        };
+        // The hint stays the same while the arrow is held, so the rows below it keep still.
+        let hint = "Click the buttons or the caption to hide or show them. Hold the arrow and \
+                    move the mouse up or down as if over your screen to set the distance from the \
+                    edge. Past the middle the pill goes to the other edge.";
         div().flex().flex_col().gap_2().py_3().child(stage).child(
             div()
                 .text_size(theme.text(Text::Small))
@@ -1086,22 +1130,20 @@ impl Studio {
             .into_any_element()
     }
 
-    /// The arrow between the pill and its edge of the stage, held to place the pill.
+    /// The arrow between the pill and its edge of the stage, from `top` and `room` long, held to
+    /// place the pill.
     fn arrow(
         &self,
         config: &PillConfig,
-        pill_top: f32,
+        top: f32,
+        room: f32,
         resting: f32,
         held: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = *cx.theme();
         let bottom = config.edge == PillEdge::Bottom;
-        let (top, height) = match bottom {
-            true => (pill_top + pill::HEIGHT.as_f32(), ARROW_ROOM),
-            false => (0., pill_top),
-        };
-        let (top, height) = (top + ARROW_INSET, height - ARROW_INSET * 2.);
+        let (top, height) = (top + ARROW_INSET, room - ARROW_INSET * 2.);
         let line = || {
             div()
                 .flex_1()
@@ -1272,22 +1314,22 @@ fn landed(config: SpringConfig, on: bool) -> Spring {
     spring
 }
 
-/// The pill's top on a monitor `height` tall, for a pill `margin` from `edge`.
-fn top_of(edge: PillEdge, margin: f32, height: f32) -> f32 {
+/// The top on a monitor `height` tall of a pill `pill` tall and `margin` from `edge`.
+fn top_of(edge: PillEdge, margin: f32, height: f32, pill: f32) -> f32 {
     let top = match edge {
         PillEdge::Top => margin,
-        PillEdge::Bottom => height - pill::HEIGHT.as_f32() - margin,
+        PillEdge::Bottom => height - pill - margin,
     };
-    clamp_top(top, height)
+    clamp_top(top, height, pill)
 }
 
-fn clamp_top(top: f32, height: f32) -> f32 {
-    top.clamp(0., (height - pill::HEIGHT.as_f32()).max(0.))
+fn clamp_top(top: f32, height: f32, pill: f32) -> f32 {
+    top.clamp(0., (height - pill).max(0.))
 }
 
-/// The edge a pill with its top at `top` sits on, the nearer one, and its distance from it.
-fn placement(top: f32, height: f32) -> (PillEdge, f32) {
-    let pill = pill::HEIGHT.as_f32();
+/// The edge a pill `pill` tall with its top at `top` sits on, the nearer one, and its distance
+/// from it.
+fn placement(top: f32, height: f32, pill: f32) -> (PillEdge, f32) {
     match top + pill / 2. < height / 2. {
         true => (PillEdge::Top, top.round()),
         false => (PillEdge::Bottom, (height - pill - top).round()),
@@ -1320,8 +1362,10 @@ mod tests {
             (PillEdge::Top, 0.),
             (PillEdge::Top, 300.),
         ] {
-            let top = top_of(edge, margin, 1080.);
-            assert_eq!(placement(top, 1080.), (edge, margin));
+            for pill in [44., 66.] {
+                let top = top_of(edge, margin, 1080., pill);
+                assert_eq!(placement(top, 1080., pill), (edge, margin));
+            }
         }
     }
 
@@ -1347,9 +1391,9 @@ mod tests {
 
     #[test]
     fn crossing_the_middle_moves_the_pill_to_the_other_edge() {
-        assert_eq!(placement(100., 1080.).0, PillEdge::Top);
-        assert_eq!(placement(900., 1080.).0, PillEdge::Bottom);
-        assert_eq!(clamp_top(-50., 1080.), 0.);
-        assert_eq!(clamp_top(5000., 1080.), 1080. - pill::HEIGHT.as_f32());
+        assert_eq!(placement(100., 1080., 44.).0, PillEdge::Top);
+        assert_eq!(placement(900., 1080., 44.).0, PillEdge::Bottom);
+        assert_eq!(clamp_top(-50., 1080., 44.), 0.);
+        assert_eq!(clamp_top(5000., 1080., 44.), 1080. - 44.);
     }
 }
