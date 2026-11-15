@@ -6,6 +6,7 @@ use gpui::Focusable as _;
 use gpui::prelude::*;
 use std::cell::Cell;
 use std::ops::Range;
+use std::rc::Rc;
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Context, Entity, Global, Hsla, Pixels,
@@ -62,6 +63,7 @@ const HOLD_MS: (f32, f32) = (150., 1000.);
 /// How often the key Tokativ binds on its own is read again, since it is changed elsewhere.
 const OWN_KEY_POLL: std::time::Duration = std::time::Duration::from_secs(2);
 const MARGIN: (f32, f32) = (0., 240.);
+const SIZE: (f32, f32) = (crate::pill::MIN_SIZE, crate::pill::MAX_SIZE);
 const IDLE_MINUTES: [u32; 5] = [0, 5, 15, 30, 60];
 /// How often the resources rows read the daemon's footprint.
 const SAMPLE_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
@@ -252,6 +254,8 @@ enum Slot {
     CustomThemes,
     Position,
     Distance,
+    /// How large the pill and the caption are drawn.
+    Size,
     Width,
     Bars,
     Caption,
@@ -296,6 +300,9 @@ pub struct Settings {
     margin: Slider,
     stretch: Slider,
     caption_width: Slider,
+    size: Slider,
+    /// Hands the size being dragged to the live preview, which shows it before it is saved.
+    sizing: Rc<Cell<Option<f32>>>,
     devices: Vec<tokativ_audio::InputDevice>,
     scrollbar: Entity<Scrollbar>,
     device_scrollbar: Entity<Scrollbar>,
@@ -392,6 +399,7 @@ impl Settings {
         .detach();
         let model_search =
             cx.new(|cx| Input::new("Search Hugging Face", cx).icon("icons/search.svg"));
+        let studio = cx.new(Studio::new);
         cx.observe(&model_search, |this: &mut Self, _, cx| {
             this.model_query_changed(cx)
         })
@@ -414,6 +422,8 @@ impl Settings {
             margin: Slider::new("margin"),
             stretch: Slider::new("stretch"),
             caption_width: Slider::new("caption-width"),
+            size: Slider::new("size"),
+            sizing: studio.read(cx).sizing(),
             devices: tokativ_audio::input_devices(),
             scrollbar: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(view)),
             device_scrollbar: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(view)),
@@ -428,7 +438,7 @@ impl Settings {
             replace_to: cx.new(|cx| Input::new("Write as", cx).compact()),
             term: cx.new(|cx| Input::new("Add a name or term", cx).compact()),
             profile_name: cx.new(|cx| Input::new("Profile name", cx).compact()),
-            studio: cx.new(Studio::new),
+            studio,
             visual: true,
             searched: String::new(),
             exploring: false,
@@ -620,6 +630,7 @@ impl Settings {
             Page::Appearance if visual => vec![
                 Slot::Editor,
                 Slot::Studio,
+                Slot::Size,
                 Slot::Title("Theme"),
                 Slot::Themes,
                 Slot::CustomThemes,
@@ -632,6 +643,7 @@ impl Settings {
                 Slot::Title("Pill"),
                 Slot::Position,
                 Slot::Distance,
+                Slot::Size,
                 Slot::Width,
                 Slot::Bars,
                 Slot::Caption,
@@ -774,6 +786,7 @@ impl Settings {
             ),
             Slot::Position => plain("Pill position", "The edge of the screen the pill sits on."),
             Slot::Distance => plain("Distance from the edge", "The gap under or over the pill."),
+            Slot::Size => plain("Size", "How large the pill and the caption are drawn."),
             Slot::Width => plain("Pill width", "A wider pill fits more bars."),
             Slot::CaptionWidth => plain(
                 "Caption width",
@@ -1074,6 +1087,22 @@ impl Settings {
                     format!("{pixels} px"),
                     |this| &mut this.margin,
                     |config, fraction| config.pill.margin = value(fraction, MARGIN).round(),
+                    cx,
+                );
+                self.row(slot, slider, cx)
+            }
+            Slot::Size => {
+                let dragging = self.size.dragging;
+                self.sizing
+                    .set(dragging.map(|size| sized(value(size, SIZE))));
+                let size = dragging.unwrap_or_else(|| fraction(config.pill.size, SIZE));
+                let percent = (sized(value(size, SIZE)) * 100.).round();
+                let slider = self.slider(
+                    &self.size,
+                    size,
+                    format!("{percent}%"),
+                    |this| &mut this.size,
+                    |config, fraction| config.pill.size = sized(value(fraction, SIZE)),
                     cx,
                 );
                 self.row(slot, slider, cx)
@@ -2807,4 +2836,9 @@ fn fraction(value: f32, (low, high): (f32, f32)) -> f32 {
 
 fn value(fraction: f32, (low, high): (f32, f32)) -> f32 {
     low + (high - low) * fraction.clamp(0., 1.)
+}
+
+/// A size rounded to whole steps of 5%, which is as fine as it is worth telling apart.
+fn sized(size: f32) -> f32 {
+    (size * 20.).round() / 20.
 }

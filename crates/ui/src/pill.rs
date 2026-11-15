@@ -72,6 +72,18 @@ const FOLDED_BLUR: Pixels = px(8.);
 pub(crate) const STRETCH_STEP: f32 = (BAR_WIDTH_PX + BAR_GAP_PX) * 2.;
 /// The most the pill can be made wider than it needs.
 pub(crate) const MAX_STRETCH: f32 = STRETCH_STEP * 17.;
+/// The range the pill and the caption can be sized in, as a share of their usual size.
+pub const MIN_SIZE: f32 = 0.75;
+pub const MAX_SIZE: f32 = 1.5;
+
+/// How large the pill and the caption are drawn for a `wanted` size, within the range they
+/// can be sized in.
+pub(crate) fn size(wanted: f32) -> f32 {
+    match wanted.is_finite() {
+        true => wanted.clamp(MIN_SIZE, MAX_SIZE),
+        false => 1.,
+    }
+}
 
 /// `stretch` rounded to whole pairs of bars, so a pill at rest never shows a pair half in.
 pub(crate) fn snap_stretch(stretch: f32) -> f32 {
@@ -89,12 +101,11 @@ pub(crate) fn width(cancel: bool, confirm: bool, stretch: f32) -> Pixels {
     )
 }
 
-/// The capsule `width` wide as it looks at rest, for the buttons and the bars to go in, drawn at
-/// `scale`. The pill moves it as it opens and closes, and the settings show it still or shrunk
-/// onto a drawing of the screen. Drawing it small rather than shrinking a full-size picture keeps
-/// its edges sharp.
+/// The capsule `width` wide as drawn, for the buttons and the bars to go in, at `scale`. The
+/// pill moves it as it opens and closes. Drawing it at its size rather than scaling a picture of
+/// it keeps its edges sharp.
 pub(crate) fn capsule(width: Pixels, scale: f32, cx: &App) -> gpui::Div {
-    face(width * scale, HEIGHT * scale, cx)
+    face(width, HEIGHT * scale, cx)
         .flex()
         .items_center()
         .justify_between()
@@ -170,13 +181,14 @@ pub(crate) fn confirm_button(
     .child(icon("icons/check.svg", ICON * scale, theme.background))
 }
 
-/// Where the pill takes clicks: the capsule at full width, not the room around it for the shadow.
-fn region(width: Pixels) -> Bounds<Pixels> {
+/// Where the pill takes clicks: the capsule at full width and drawn at `scale`, not the room
+/// around it for the shadow.
+fn region(width: Pixels, scale: f32) -> Bounds<Pixels> {
     Bounds {
-        origin: point(SHADOW, SHADOW),
+        origin: point(SHADOW * scale, SHADOW * scale),
         size: Size {
-            width,
-            height: HEIGHT,
+            width: width * scale,
+            height: HEIGHT * scale,
         },
     }
 }
@@ -216,8 +228,10 @@ pub struct Pill {
     /// width holds and the spring's bounce shows as scale, which moves by fractions of a pixel
     /// where the width can only step by whole ones.
     widened: bool,
-    /// The capsule's width once open.
+    /// The capsule's width once open, at the usual size.
     width: Pixels,
+    /// How large it is drawn, see [`size`].
+    scale: f32,
     cancel: bool,
     confirm: bool,
     layout: Bars,
@@ -240,15 +254,19 @@ pub fn open(
     );
     let (cancel, confirm) = (config.cancel_button, config.confirm_button);
     let layout = config.bars;
-    let size = Size::new(width + SHADOW * 2., HEIGHT + SHADOW * 2.);
+    let scale = size(config.size);
+    let surface = Size::new(
+        (width + SHADOW * 2.) * scale,
+        (HEIGHT + SHADOW * 2.) * scale,
+    );
     // The shadow margin is part of the surface, so the visible gap to the edge takes it off.
-    let gap = px(config.margin) - SHADOW;
-    let options = overlay::options(config.edge, gap, size, None, cx);
+    let gap = px(config.margin) - SHADOW * scale;
+    let options = overlay::options(config.edge, gap, surface, None, cx);
     let on_confirm: Handler = Rc::new(on_confirm);
     let on_cancel: Handler = Rc::new(on_cancel);
     cx.open_window(options, move |window, cx| {
         overlay::prepare(window, false);
-        let region = [region(width)];
+        let region = [region(width, scale)];
         window.set_input_region(Some(match resting {
             true => &[],
             false => &region,
@@ -268,6 +286,7 @@ pub fn open(
             resting,
             widened: false,
             width,
+            scale,
             cancel,
             confirm,
             layout,
@@ -298,7 +317,7 @@ impl Pill {
         let folded = self.closing.take().is_some() || self.resting;
         if self.resting {
             self.resting = false;
-            window.set_input_region(Some(&[region(self.width)]));
+            window.set_input_region(Some(&[region(self.width, self.scale)]));
         }
         self.levels = levels;
         self.phase = Phase::Listening;
@@ -445,7 +464,8 @@ impl Render for Pill {
             true => (1., 1. + (body - 1.) * OVERSHOOT_SCALE),
             false => (unfolded, FOLDED_SCALE + (1. - FOLDED_SCALE) * body),
         };
-        let width = ui::snapped(HEIGHT + (self.width - HEIGHT) * spread, window);
+        let size = self.scale;
+        let width = ui::snapped((HEIGHT + (self.width - HEIGHT) * spread) * size, window);
         let controls = self.controls.at().max(0.);
         let pop = (0.4 + 0.6 * controls).max(0.01);
         let control_opacity = controls.min(1.);
@@ -456,10 +476,10 @@ impl Render for Pill {
         // The capsule is placed on whole device pixels. Centring it with flex would put it on a
         // half pixel whenever the room around it is an odd number of them.
         let left = ui::snapped((window.viewport_size().width - width) / 2., window);
-        let top = ui::snapped(SHADOW, window);
+        let top = ui::snapped(SHADOW * size, window);
 
         div().size_full().relative().font_family("Inter").child(
-            capsule(width, 1., cx)
+            capsule(width, size, cx)
                 .absolute()
                 .left(left)
                 .top(top)
@@ -468,11 +488,11 @@ impl Render for Pill {
                         .layer_scale(scale.max(0.01))
                 })
                 .when(unfolded < 1., |this| {
-                    this.blur(FOLDED_BLUR * (1. - unfolded))
+                    this.blur(FOLDED_BLUR * size * (1. - unfolded))
                 })
                 .when(self.cancel, |this| {
                     this.child(
-                        cancel_button("cancel", 1., cx)
+                        cancel_button("cancel", size, cx)
                             .when(moving, |this| {
                                 this.opacity(control_opacity).layer_scale(pop)
                             })
@@ -480,13 +500,13 @@ impl Render for Pill {
                     )
                 })
                 .child(
-                    bars(shown, reveal, bar_color, 1., self.layout)
+                    bars(shown, reveal, bar_color, size, self.layout)
                         .flex_1()
                         .h_full(),
                 )
                 .when(self.confirm, |this| {
                     this.child(
-                        confirm_button("confirm", 1., cx)
+                        confirm_button("confirm", size, cx)
                             .opacity(match listening {
                                 true => control_opacity,
                                 false => control_opacity * 0.5,

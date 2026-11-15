@@ -83,6 +83,8 @@ pub struct Caption {
     layout_width: Option<Pixels>,
     closing: Option<Instant>,
     beat: Option<Instant>,
+    /// How large it is drawn, see [`pill::size`].
+    scale: f32,
 }
 
 /// Opens the caption beside the pill `config` places, as wide as it sets, folded until the first
@@ -93,26 +95,28 @@ pub fn open(
     cx: &mut gpui::App,
 ) -> anyhow::Result<WindowHandle<Caption>> {
     let (edge, margin) = (config.edge, config.margin);
-    let wanted = px(config.caption_width.clamp(MIN_WIDTH, MAX_WIDTH));
+    let scale = pill::size(config.size);
+    let shadow = pill::SHADOW * scale;
+    let wanted = px(config.caption_width.clamp(MIN_WIDTH, MAX_WIDTH)) * scale;
     let width = display
         .and_then(|id| cx.find_display(id))
-        .map(|display| (display.visible_bounds().size.width - pill::SHADOW * 2.).min(wanted))
+        .map(|display| (display.visible_bounds().size.width - shadow * 2.).min(wanted))
         .unwrap_or(wanted);
     let size = Size::new(
-        width + pill::SHADOW * 2.,
-        TEXT_HEIGHT + PADDING_Y * 2. + BORDER * 2. + pill::SHADOW * 2.,
+        width + shadow * 2.,
+        (TEXT_HEIGHT + PADDING_Y * 2.) * scale + BORDER * 2. + shadow * 2.,
     );
     // The caption starts where the pill ends, and its window starts a shadow's width earlier.
-    let offset = px(margin) - pill::SHADOW + pill::HEIGHT + GAP;
+    let offset = px(margin) - shadow + (pill::HEIGHT + GAP) * scale;
     let options = overlay::options(edge, offset, size, display, cx);
     cx.open_window(options, move |window, cx| {
         overlay::prepare(window, true);
-        cx.new(|_| Caption::new(edge))
+        cx.new(|_| Caption::new(edge, scale))
     })
 }
 
 impl Caption {
-    fn new(edge: PillEdge) -> Self {
+    fn new(edge: PillEdge, scale: f32) -> Self {
         Self {
             edge,
             words: Vec::new(),
@@ -126,6 +130,7 @@ impl Caption {
             layout_width: None,
             closing: None,
             beat: None,
+            scale,
         }
     }
 
@@ -133,7 +138,7 @@ impl Caption {
     /// being spoken. Words that stay as they were keep still, and each new or changed word comes
     /// in afresh.
     pub fn show(&mut self, written: &str, draft: &str, cx: &mut Context<Self>) {
-        self.words = reconcile(std::mem::take(&mut self.words), written, draft);
+        self.words = reconcile(std::mem::take(&mut self.words), written, draft, self.scale);
         self.layout_dirty = true;
         if !self.words.is_empty() && self.closing.is_none() {
             self.body.aim(1., OPEN);
@@ -152,17 +157,18 @@ impl Caption {
 
     fn resize(&mut self, mut content: Size<Pixels>) {
         let first = self.content_size.is_none();
+        let text_height = TEXT_HEIGHT * self.scale;
         self.scroll.aim(
-            (content.height - TEXT_HEIGHT).max(Pixels::ZERO).as_f32(),
+            (content.height - text_height).max(Pixels::ZERO).as_f32(),
             SCROLL,
         );
-        content.height = content.height.min(TEXT_HEIGHT);
+        content.height = content.height.min(text_height);
         self.width.aim(
-            (content.width + PADDING_X * 2. + BORDER * 2.).as_f32(),
+            (content.width + PADDING_X * self.scale * 2. + BORDER * 2.).as_f32(),
             RESIZE,
         );
         self.height.aim(
-            (content.height + PADDING_Y * 2. + BORDER * 2.).as_f32(),
+            (content.height + PADDING_Y * self.scale * 2. + BORDER * 2.).as_f32(),
             RESIZE,
         );
         // The opening animation already unfolds the first frame. Later changes keep the
@@ -178,7 +184,9 @@ impl Caption {
 
     fn trim_history(&mut self, metrics: &[Size<Pixels>], width: Pixels) -> usize {
         let excess = self.words.len().saturating_sub(MAX_WORDS);
-        let (count, removed_height) = history_prefix(metrics, width, px(self.scroll.at()), excess);
+        let gap = WORD_GAP * self.scale;
+        let (count, removed_height) =
+            history_prefix(metrics, width, gap, px(self.scroll.at()), excess);
         if count > 0 {
             self.words.drain(..count);
             // The retained words keep the same wrapping and screen coordinates. Rebase both
@@ -198,8 +206,9 @@ impl Caption {
     /// Shape only changed words, and only when text or available width changes. The same
     /// cached shapes supply layout and painting; animation frames do no text measurement.
     fn layout(&mut self, window: &Window) {
+        let scale = self.scale;
         let available =
-            (window.viewport_size().width - pill::SHADOW * 2. - PADDING_X * 2. - BORDER * 2.)
+            (window.viewport_size().width - (pill::SHADOW + PADDING_X) * scale * 2. - BORDER * 2.)
                 .max(px(1.));
         if self.words.is_empty() || (!self.layout_dirty && self.layout_width == Some(available)) {
             return;
@@ -209,7 +218,7 @@ impl Caption {
             .iter_mut()
             .map(|word| word.morph.natural_width(window))
             .sum::<Pixels>()
-            + WORD_GAP * self.words.len().saturating_sub(1) as f32;
+            + WORD_GAP * scale * self.words.len().saturating_sub(1) as f32;
         let width = (natural + px(1.)).min(available);
         let mut metrics: Vec<_> = self
             .words
@@ -218,7 +227,7 @@ impl Caption {
             .collect();
         let removed = self.trim_history(&metrics, width);
         metrics.drain(..removed);
-        let (positions, height) = flow_layout(&metrics, width);
+        let (positions, height) = flow_layout(&metrics, width, WORD_GAP * scale);
         for (word, position) in self.words.iter_mut().zip(positions) {
             word.x.aim(position.x.as_f32(), REFLOW);
             word.y.aim(position.y.as_f32(), REFLOW);
@@ -298,14 +307,17 @@ impl Render for Caption {
         }
 
         let theme = cx.theme();
-        let content = self.content_size.unwrap_or(Size::new(px(1.), LINE_HEIGHT));
+        let scale = self.scale;
+        let content = self
+            .content_size
+            .unwrap_or(Size::new(px(1.), LINE_HEIGHT * scale));
         let body = self.body.at().clamp(0., 1.2);
         let shown = body.min(1.);
         // The caption grows out of the pill's side, so it moves in from there.
         let towards_pill = match self.edge {
             PillEdge::Bottom => FOLDED_SHIFT,
             PillEdge::Top => -FOLDED_SHIFT,
-        };
+        } * scale;
         let unfolding = body != 1.;
         // Font rasterization snaps vertical glyph origins to device pixels. Scroll by whole
         // device pixels first, then composite only the fractional remainder for smooth motion.
@@ -313,9 +325,9 @@ impl Render for Caption {
         let (scroll, translation) = scroll_position(px(self.scroll.at()), window.scale_factor());
         self.scroll_handle.set_offset(point(px(0.), -scroll));
 
-        let bubble = bubble(1., cx)
-            .w(px(self.width.at()).max(PADDING_X * 2. + BORDER * 2.))
-            .h(px(self.height.at()).max(PADDING_Y * 2. + BORDER * 2.))
+        let bubble = bubble(scale, cx)
+            .w(px(self.width.at()).max(PADDING_X * scale * 2. + BORDER * 2.))
+            .h(px(self.height.at()).max(PADDING_Y * scale * 2. + BORDER * 2.))
             .when(unfolding, |this| {
                 this.opacity((shown * 1.6).min(1.))
                     .layer_scale((FOLDED_SCALE + (1. - FOLDED_SCALE) * body).max(0.01))
@@ -328,18 +340,20 @@ impl Render for Caption {
                     ))
                     .layer_translate(point(px(0.), towards_pill * (1. - shown)))
             })
-            .when(shown < 1., |this| this.blur(FOLDED_BLUR * (1. - shown)))
+            .when(shown < 1., |this| {
+                this.blur(FOLDED_BLUR * scale * (1. - shown))
+            })
             .child(
                 // Scroll before painting/clipping, so incoming lines are rendered throughout
                 // the motion. A composited translation would only move already visible pixels.
                 div()
                     .id("caption-text")
                     .relative()
-                    .left(-TEXT_BLEED)
-                    .top(-TEXT_BLEED)
-                    .w(content.width + TEXT_BLEED * 2.)
-                    .h(content.height + TEXT_BLEED * 2.)
-                    .p(TEXT_BLEED)
+                    .left(-TEXT_BLEED * scale)
+                    .top(-TEXT_BLEED * scale)
+                    .w(content.width + TEXT_BLEED * scale * 2.)
+                    .h(content.height + TEXT_BLEED * scale * 2.)
+                    .p(TEXT_BLEED * scale)
                     .flex_none()
                     .overflow_hidden()
                     .overflow_y_scroll()
@@ -361,7 +375,7 @@ impl Render for Caption {
         // pill sits at the top.
         div()
             .size_full()
-            .p(pill::SHADOW)
+            .p(pill::SHADOW * scale)
             .flex()
             .flex_col()
             .items_center()
@@ -394,7 +408,7 @@ pub(crate) fn bubble(scale: f32, cx: &gpui::App) -> gpui::Div {
 fn text_flow(caption: &Caption, content: Size<Pixels>, settled: Hsla, draft: Hsla) -> gpui::Div {
     let viewport = TextViewport {
         scroll: caption.scroll_handle.clone(),
-        bleed: TEXT_BLEED,
+        bleed: TEXT_BLEED * caption.scale,
         size: content,
         translation: -px(caption.scroll.at()) - caption.scroll_handle.offset().y,
     };
@@ -404,7 +418,7 @@ fn text_flow(caption: &Caption, content: Size<Pixels>, settled: Hsla, draft: Hsl
         .w(content.width)
         .h(content.height + px(caption.scroll.target))
         .children(caption.words.iter().map(|word| {
-            let blur = NEW_WORD_BLUR * (1. - word.reveal.at().clamp(0., 1.));
+            let blur = NEW_WORD_BLUR * caption.scale * (1. - word.reveal.at().clamp(0., 1.));
             word.morph
                 .element(
                     blend(draft, settled, word.ink.at().clamp(0., 1.)),
@@ -426,19 +440,24 @@ fn scroll_position(position: Pixels, scale: f32) -> (Pixels, Pixels) {
     (snapped, snapped - position)
 }
 
-fn flow_layout(metrics: &[Size<Pixels>], width: Pixels) -> (Vec<gpui::Point<Pixels>>, Pixels) {
+/// Lays words out in rows `width` wide, `gap` apart.
+fn flow_layout(
+    metrics: &[Size<Pixels>],
+    width: Pixels,
+    gap: Pixels,
+) -> (Vec<gpui::Point<Pixels>>, Pixels) {
     let mut used = Pixels::ZERO;
     let mut row_height = Pixels::ZERO;
     let mut total = Pixels::ZERO;
     let mut positions = Vec::with_capacity(metrics.len());
     for word in metrics {
-        if used > Pixels::ZERO && used + WORD_GAP + word.width > width {
+        if used > Pixels::ZERO && used + gap + word.width > width {
             total += row_height;
             used = Pixels::ZERO;
             row_height = Pixels::ZERO;
         }
         if used > Pixels::ZERO {
-            used += WORD_GAP;
+            used += gap;
         }
         positions.push(point(used, total));
         used += word.width;
@@ -451,6 +470,7 @@ fn flow_layout(metrics: &[Size<Pixels>], width: Pixels) -> (Vec<gpui::Point<Pixe
 fn history_prefix(
     metrics: &[Size<Pixels>],
     width: Pixels,
+    gap: Pixels,
     scrolled: Pixels,
     excess: usize,
 ) -> (usize, Pixels) {
@@ -459,7 +479,7 @@ fn history_prefix(
     let mut removed_height = Pixels::ZERO;
     let mut prefix = (0, Pixels::ZERO);
     for (index, word) in metrics.iter().enumerate() {
-        if used > Pixels::ZERO && used + WORD_GAP + word.width > width {
+        if used > Pixels::ZERO && used + gap + word.width > width {
             removed_height += row_height;
             if index > excess || removed_height > scrolled {
                 break;
@@ -469,7 +489,7 @@ fn history_prefix(
             row_height = Pixels::ZERO;
         }
         if used > Pixels::ZERO {
-            used += WORD_GAP;
+            used += gap;
         }
         used += word.width;
         row_height = row_height.max(word.height);
@@ -478,8 +498,9 @@ fn history_prefix(
 }
 
 /// Keep springs for words whose text and position survive a draft revision or a final commit.
-/// Absolute indices also preserve them when old history is dropped from the front.
-fn reconcile(previous: Vec<Word>, written: &str, draft: &str) -> Vec<Word> {
+/// Absolute indices also preserve them when old history is dropped from the front. New words
+/// are drawn at `scale`.
+fn reconcile(previous: Vec<Word>, written: &str, draft: &str, scale: f32) -> Vec<Word> {
     let next: Vec<_> = written
         .split_whitespace()
         .map(|word| (word, false))
@@ -530,7 +551,7 @@ fn reconcile(previous: Vec<Word>, written: &str, draft: &str) -> Vec<Word> {
             let word = Word {
                 index,
                 text: text.to_owned(),
-                morph: Morph::new(text),
+                morph: Morph::new(text, scale),
                 reveal,
                 x: Spring::new(REFLOW),
                 y: Spring::new(REFLOW),
@@ -597,10 +618,10 @@ mod tests {
 
     #[test]
     fn only_new_words_start_blurred_and_punctuation_keeps_the_existing_reveal() {
-        let mut words = reconcile(Vec::new(), "", "Привет");
+        let mut words = reconcile(Vec::new(), "", "Привет", 1.);
         words[0].reveal.finish();
         words[0].morph.finish();
-        let words = reconcile(words, "Привет,", "мир");
+        let words = reconcile(words, "Привет,", "мир", 1.);
         assert_eq!(words[0].reveal.at(), 1.);
         assert!(words[0].reveal.settled());
         assert_eq!(words[1].reveal.at(), 0.);
@@ -609,12 +630,12 @@ mod tests {
 
     #[test]
     fn inserting_a_word_does_not_restart_the_words_after_it() {
-        let mut words = reconcile(Vec::new(), "", "Мы любим Rust");
+        let mut words = reconcile(Vec::new(), "", "Мы любим Rust", 1.);
         for word in &mut words {
             word.reveal.finish();
             word.morph.finish();
         }
-        let words = reconcile(words, "", "Мы, очень любим Rust.");
+        let words = reconcile(words, "", "Мы, очень любим Rust.", 1.);
         assert_eq!(words[1].text, "очень");
         assert_eq!(words[1].reveal.at(), 0.);
         for index in [0, 2, 3] {
@@ -631,17 +652,17 @@ mod tests {
             Size::new(px(100.), LINE_HEIGHT),
             Size::new(px(140.), LINE_HEIGHT),
         ];
-        let (positions, height) = flow_layout(&metrics, px(245.));
+        let (positions, height) = flow_layout(&metrics, px(245.), WORD_GAP);
         assert_eq!(height, LINE_HEIGHT);
         assert_eq!(positions[1], point(px(105.), px(0.)));
-        let (positions, height) = flow_layout(&metrics, px(244.));
+        let (positions, height) = flow_layout(&metrics, px(244.), WORD_GAP);
         assert_eq!(height, LINE_HEIGHT * 2.);
         assert_eq!(positions[1], point(px(0.), LINE_HEIGHT));
     }
 
     #[test]
     fn overflowing_lines_scroll_without_jumping_or_restarting_the_motion() {
-        let mut caption = Caption::new(PillEdge::Bottom);
+        let mut caption = Caption::new(PillEdge::Bottom, 1.);
         caption.resize(Size::new(px(478.), TEXT_HEIGHT));
         caption.resize(Size::new(px(478.), TEXT_HEIGHT + LINE_HEIGHT));
         assert_eq!(caption.scroll.at(), 0.);
@@ -677,8 +698,8 @@ mod tests {
             .map(|i| format!("word{i}"))
             .collect::<Vec<_>>()
             .join(" ");
-        let mut caption = Caption::new(PillEdge::Top);
-        caption.words = reconcile(Vec::new(), &text, "");
+        let mut caption = Caption::new(PillEdge::Top, 1.);
+        caption.words = reconcile(Vec::new(), &text, "", 1.);
         // Three words per row at this width: 46 rows, with the last three visible.
         caption.resize(Size::new(px(40.), LINE_HEIGHT * 46.));
         caption.scroll.state.velocity = 10.;
@@ -696,11 +717,11 @@ mod tests {
     fn history_trimming_never_splits_a_row_or_removes_visible_content() {
         let metrics = vec![Size::new(px(10.), LINE_HEIGHT); 137];
         assert_eq!(
-            history_prefix(&metrics, px(40.), px(100.), 7),
+            history_prefix(&metrics, px(40.), WORD_GAP, px(100.), 7),
             (6, LINE_HEIGHT * 2.)
         );
         assert_eq!(
-            history_prefix(&metrics, px(40.), px(36.), 9),
+            history_prefix(&metrics, px(40.), WORD_GAP, px(36.), 9),
             (3, LINE_HEIGHT)
         );
         // A single long word can span multiple text lines.
@@ -709,18 +730,18 @@ mod tests {
             Size::new(px(10.), LINE_HEIGHT),
         ];
         assert_eq!(
-            history_prefix(&metrics, px(40.), LINE_HEIGHT, 1),
+            history_prefix(&metrics, px(40.), WORD_GAP, LINE_HEIGHT, 1),
             (0, px(0.))
         );
         assert_eq!(
-            history_prefix(&metrics, px(40.), LINE_HEIGHT * 2., 1),
+            history_prefix(&metrics, px(40.), WORD_GAP, LINE_HEIGHT * 2., 1),
             (1, LINE_HEIGHT * 2.)
         );
     }
 
     #[test]
     fn resizing_preserves_dimensions_and_velocity_when_new_text_arrives() {
-        let mut caption = Caption::new(PillEdge::Bottom);
+        let mut caption = Caption::new(PillEdge::Bottom, 1.);
         caption.resize(Size::new(px(100.), LINE_HEIGHT));
         let width = caption.width.at();
         let height = caption.height.at();
@@ -748,7 +769,7 @@ mod tests {
 
     #[test]
     fn reduced_motion_finishes_a_resize_without_remaining_velocity() {
-        let mut caption = Caption::new(PillEdge::Top);
+        let mut caption = Caption::new(PillEdge::Top, 1.);
         caption.resize(Size::new(px(100.), LINE_HEIGHT));
         caption.resize(Size::new(px(470.), TEXT_HEIGHT));
         caption.beat = Some(Instant::now() - Duration::from_millis(50));
@@ -762,11 +783,11 @@ mod tests {
 
     #[test]
     fn committing_a_draft_changes_only_its_color_target() {
-        let mut words = reconcile(Vec::new(), "", "Привет мир");
+        let mut words = reconcile(Vec::new(), "", "Привет мир", 1.);
         for word in &mut words {
             word.morph.finish();
         }
-        let mut words = reconcile(words, "Привет мир", "");
+        let mut words = reconcile(words, "Привет мир", "", 1.);
         for word in &mut words {
             assert!(word.morph.settled());
             assert_eq!(word.ink.at(), 0.);
@@ -778,14 +799,14 @@ mod tests {
 
     #[test]
     fn revising_a_word_keeps_the_other_words_and_their_color_in_motion() {
-        let mut words = reconcile(Vec::new(), "One", "small step");
+        let mut words = reconcile(Vec::new(), "One", "small step", 1.);
         for word in &mut words {
             word.morph.finish();
         }
         words[0].ink.step(Duration::from_millis(100));
         let color = words[0].ink.at();
         let velocity = words[0].ink.state.velocity;
-        let words = reconcile(words, "One", "giant step");
+        let words = reconcile(words, "One", "giant step", 1.);
         assert_eq!(words[0].ink.at(), color);
         assert_eq!(words[0].ink.state.velocity, velocity);
         assert!(!words[1].morph.settled());
@@ -814,11 +835,11 @@ mod tests {
             .map(|i| format!("word{i}"))
             .collect::<Vec<_>>()
             .join(" ");
-        let mut words = reconcile(Vec::new(), &text, "");
+        let mut words = reconcile(Vec::new(), &text, "", 1.);
         for word in &mut words {
             word.morph.finish();
         }
-        let words = reconcile(words, &text, "new");
+        let words = reconcile(words, &text, "new", 1.);
         assert_eq!(words.len(), MAX_WORDS + 1);
         assert_eq!(words[0].index, 0);
         assert!(words[0].morph.settled());

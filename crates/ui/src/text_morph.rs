@@ -31,11 +31,11 @@ struct Glyph {
 }
 
 impl Glyph {
-    fn new(text: &str) -> Self {
+    fn new(text: &str, scale: f32) -> Self {
         let mut alpha = Spring::new(FADE);
         alpha.aim(1., FADE);
         let mut y = Spring::new(MOVE);
-        y.state.position = RISE;
+        y.state.position = RISE * scale;
         Self {
             text: text.to_owned().into(),
             x: Spring::new(MOVE),
@@ -56,6 +56,8 @@ pub(crate) struct Morph {
     size: Size<Pixels>,
     limit: Pixels,
     moving: bool,
+    /// How large the text is drawn, 1 for [`FONT_SIZE`] on [`LINE_HEIGHT`].
+    scale: f32,
 }
 
 pub(crate) struct TextViewport {
@@ -66,7 +68,7 @@ pub(crate) struct TextViewport {
 }
 
 impl Morph {
-    pub fn new(text: &str) -> Self {
+    pub fn new(text: &str, scale: f32) -> Self {
         let mut this = Self {
             text: "".into(),
             glyphs: Vec::new(),
@@ -75,6 +77,7 @@ impl Morph {
             size: Size::default(),
             limit: Pixels::ZERO,
             moving: false,
+            scale,
         };
         this.retarget(text);
         this
@@ -95,13 +98,13 @@ impl Morph {
             self.glyphs.push(
                 matched
                     .and_then(|index| previous[index].take())
-                    .unwrap_or_else(|| Glyph::new(text)),
+                    .unwrap_or_else(|| Glyph::new(text, self.scale)),
             );
         }
         for mut glyph in previous.into_iter().flatten() {
             glyph.present = false;
             glyph.alpha.aim(0., FADE);
-            glyph.y.aim(glyph.y.target - RISE, MOVE);
+            glyph.y.aim(glyph.y.target - RISE * self.scale, MOVE);
             leaving.push(glyph);
         }
         self.glyphs.extend(leaving);
@@ -114,7 +117,7 @@ impl Morph {
     pub fn natural_width(&mut self, window: &Window) -> Pixels {
         let line = self
             .natural
-            .get_or_insert_with(|| shape(self.text.clone(), None, window));
+            .get_or_insert_with(|| shape(self.text.clone(), None, self.scale, window));
         line.unwrapped_layout.width.ceil()
     }
 
@@ -127,13 +130,14 @@ impl Morph {
         let line = if natural.width() <= limit {
             natural.clone()
         } else {
-            shape(self.text.clone(), Some(limit), window)
+            shape(self.text.clone(), Some(limit), self.scale, window)
         };
-        self.size = line.size(LINE_HEIGHT);
+        let line_height = LINE_HEIGHT * self.scale;
+        self.size = line.size(line_height);
         self.size.width = self.size.width.ceil().min(limit);
         let mut byte = 0;
         for glyph in self.glyphs.iter_mut().filter(|glyph| glyph.present) {
-            let destination = glyph_position(&line, byte);
+            let destination = glyph_position(&line, byte, line_height);
             if !glyph.placed {
                 glyph.x.state.position = destination.x.as_f32();
                 glyph.y.state.position += destination.y.as_f32();
@@ -144,7 +148,7 @@ impl Morph {
             self.moving |= !glyph.x.settled() || !glyph.y.settled();
             glyph
                 .shape
-                .get_or_insert_with(|| shape(glyph.text.clone(), None, window));
+                .get_or_insert_with(|| shape(glyph.text.clone(), None, self.scale, window));
             byte += glyph.text.len();
         }
         self.limit = limit;
@@ -202,7 +206,7 @@ impl Morph {
                         glyph.shape.clone()?,
                         point(px(glyph.x.at()), px(glyph.y.at())),
                         glyph.alpha.at().clamp(0., 1.),
-                        px(glyph.y.target + if glyph.present { 0. } else { RISE }),
+                        px(glyph.y.target + if glyph.present { 0. } else { RISE * self.scale }),
                     ))
                 })
                 .collect()
@@ -213,6 +217,7 @@ impl Morph {
         let bleed = viewport.bleed;
         let viewport_size = viewport.size;
         let translation = viewport.translation;
+        let scale = self.scale;
         canvas(
             |_, _, _| (),
             move |bounds, _, window, cx| {
@@ -230,23 +235,24 @@ impl Morph {
                 if moving {
                     for (line, offset, alpha, row) in glyphs {
                         let origin = bounds.origin + offset;
-                        let alpha =
-                            alpha * row_visibility(bounds.origin.y + row + translation, viewport);
+                        let alpha = alpha
+                            * row_visibility(bounds.origin.y + row + translation, viewport, scale);
                         if alpha > 0. {
-                            paint_line(&line, origin, color.opacity(alpha), window, cx);
+                            paint_line(&line, origin, color.opacity(alpha), scale, window, cx);
                         }
                     }
                 } else if let Some(line) = line {
                     if line.wrap_boundaries().is_empty() {
-                        let alpha = row_visibility(bounds.origin.y + translation, viewport);
+                        let alpha = row_visibility(bounds.origin.y + translation, viewport, scale);
                         if alpha > 0. {
-                            paint_line(&line, bounds.origin, color.opacity(alpha), window, cx);
+                            let color = color.opacity(alpha);
+                            paint_line(&line, bounds.origin, color, scale, window, cx);
                         }
                     } else {
                         window.with_content_mask(
                             Some(gpui::ContentMask { bounds: viewport }),
                             |window| {
-                                paint_line(&line, bounds.origin, color, window, cx);
+                                paint_line(&line, bounds.origin, color, scale, window, cx);
                             },
                         );
                     }
@@ -265,43 +271,51 @@ fn paint_line(
     line: &WrappedLine,
     origin: Point<Pixels>,
     color: Hsla,
+    scale: f32,
     window: &mut Window,
     cx: &mut App,
 ) {
+    let line_height = LINE_HEIGHT * scale;
     let _ = line.paint_tinted(
         origin,
-        LINE_HEIGHT,
+        line_height,
         TextAlign::Left,
         None,
         color,
         window,
         cx,
     );
-    let baseline = (LINE_HEIGHT - line.ascent() - line.descent()) / 2. + line.ascent();
+    let baseline = (line_height - line.ascent() - line.descent()) / 2. + line.ascent();
     let opacity = Style {
         opacity: Some(color.a),
         ..Style::default()
     };
     opacity.paint(
-        Bounds::new(origin, line.size(LINE_HEIGHT)),
+        Bounds::new(origin, line.size(line_height)),
         window,
         cx,
         |window, _| {
             for run in &line.unwrapped_layout.runs {
                 for glyph in run.glyphs.iter().filter(|glyph| glyph.is_emoji) {
-                    let position = glyph_position(line, glyph.index)
+                    let position = glyph_position(line, glyph.index, line_height)
                         + point(
                             glyph.position.x - line.unwrapped_layout.x_for_index(glyph.index),
                             baseline + glyph.position.y,
                         );
-                    let _ = window.paint_emoji(origin + position, run.font_id, glyph.id, FONT_SIZE);
+                    let font_size = FONT_SIZE * scale;
+                    let _ = window.paint_emoji(origin + position, run.font_id, glyph.id, font_size);
                 }
             }
         },
     );
 }
 
-fn shape(text: SharedString, limit: Option<Pixels>, window: &Window) -> Rc<WrappedLine> {
+fn shape(
+    text: SharedString,
+    limit: Option<Pixels>,
+    scale: f32,
+    window: &Window,
+) -> Rc<WrappedLine> {
     // Explicit emoji presentation must also override a monochrome glyph in the text font
     // (for example, Inter's heart). Use an installed color font for the complete cluster.
     let emoji_font = text
@@ -328,7 +342,7 @@ fn shape(text: SharedString, limit: Option<Pixels>, window: &Window) -> Rc<Wrapp
     Rc::new(
         window
             .text_system()
-            .shape_text(text, FONT_SIZE, &runs, limit, None)
+            .shape_text(text, FONT_SIZE * scale, &runs, limit, None)
             .expect("caption text must shape")
             .into_iter()
             .next()
@@ -363,7 +377,7 @@ fn text_runs(text: &str, emoji_font: Option<&'static str>) -> Vec<TextRun> {
     runs
 }
 
-fn glyph_position(line: &WrappedLine, byte: usize) -> gpui::Point<Pixels> {
+fn glyph_position(line: &WrappedLine, byte: usize, line_height: Pixels) -> gpui::Point<Pixels> {
     // At a soft wrap's exact byte boundary the glyph belongs to the following row.
     let mut start = 0;
     let mut row = 0;
@@ -377,12 +391,14 @@ fn glyph_position(line: &WrappedLine, byte: usize) -> gpui::Point<Pixels> {
     }
     point(
         line.unwrapped_layout.x_for_index(byte) - line.unwrapped_layout.x_for_index(start),
-        LINE_HEIGHT * row as f32,
+        line_height * row as f32,
     )
 }
 
-fn row_visibility(y: Pixels, viewport: Bounds<Pixels>) -> f32 {
-    let coverage = ((y + LINE_HEIGHT).min(viewport.bottom()) - y.max(viewport.top())) / LINE_HEIGHT;
+/// How much of a row of text drawn at `scale` with its top at `y` shows in `viewport`.
+fn row_visibility(y: Pixels, viewport: Bounds<Pixels>, scale: f32) -> f32 {
+    let line_height = LINE_HEIGHT * scale;
+    let coverage = ((y + line_height).min(viewport.bottom()) - y.max(viewport.top())) / line_height;
     // Fade through half a line of travel, finishing inside the existing padding/bleed.
     // No visible ink reaches the card's clip, and old rows have exactly zero opacity at rest.
     let t = ((coverage - 0.5) * 2.).clamp(0., 1.);
@@ -472,7 +488,7 @@ mod tests {
 
     #[test]
     fn punctuation_does_not_restart_existing_letters_or_their_velocity() {
-        let mut morph = Morph::new("привет");
+        let mut morph = Morph::new("привет", 1.);
         morph.finish();
         morph.glyphs[0].x.state.velocity = 7.;
         morph.retarget("привет,");
@@ -490,7 +506,7 @@ mod tests {
             align(&["c", "a", "t"], &["c", "o", "a", "t"]),
             vec![Some(0), None, Some(1), Some(2)]
         );
-        let mut morph = Morph::new("cat");
+        let mut morph = Morph::new("cat", 1.);
         morph.finish();
         morph.retarget("coat");
         assert_eq!(
@@ -508,7 +524,7 @@ mod tests {
 
     #[test]
     fn combining_marks_and_emoji_remain_whole_graphemes() {
-        let morph = Morph::new("е\u{301}👩‍💻");
+        let morph = Morph::new("е\u{301}👩‍💻", 1.);
         assert_eq!(morph.glyphs.len(), 2);
         assert_eq!(morph.glyphs[0].text.as_ref(), "е\u{301}");
         assert_eq!(morph.glyphs[1].text.as_ref(), "👩‍💻");
@@ -520,18 +536,21 @@ mod tests {
             origin: point(px(0.), px(10.)),
             size: Size::new(px(100.), LINE_HEIGHT * 3.),
         };
-        assert_eq!(row_visibility(px(10.) - LINE_HEIGHT, viewport), 0.);
+        assert_eq!(row_visibility(px(10.) - LINE_HEIGHT, viewport, 1.), 0.);
         assert_eq!(
-            row_visibility(px(10.) - LINE_HEIGHT + px(0.8), viewport),
+            row_visibility(px(10.) - LINE_HEIGHT + px(0.8), viewport, 1.),
             0.
         );
-        assert_eq!(row_visibility(viewport.bottom(), viewport), 0.);
-        assert_eq!(row_visibility(px(10.), viewport), 1.);
-        assert_eq!(row_visibility(px(10.) - LINE_HEIGHT / 4., viewport), 0.5);
-        assert_eq!(row_visibility(px(10.) - LINE_HEIGHT / 2., viewport), 0.);
+        assert_eq!(row_visibility(viewport.bottom(), viewport, 1.), 0.);
+        assert_eq!(row_visibility(px(10.), viewport, 1.), 1.);
+        assert_eq!(
+            row_visibility(px(10.) - LINE_HEIGHT / 4., viewport, 1.),
+            0.5
+        );
+        assert_eq!(row_visibility(px(10.) - LINE_HEIGHT / 2., viewport, 1.), 0.);
         for step in 1..=24 {
-            let previous = row_visibility(px(10.) - px((step - 1) as f32 / 2.), viewport);
-            let current = row_visibility(px(10.) - px(step as f32 / 2.), viewport);
+            let previous = row_visibility(px(10.) - px((step - 1) as f32 / 2.), viewport, 1.);
+            let current = row_visibility(px(10.) - px(step as f32 / 2.), viewport, 1.);
             assert!(current <= previous);
             assert!(previous - current < 0.07);
         }
