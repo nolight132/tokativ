@@ -7,6 +7,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- On Plasma the input method stayed off after Tokativ moved to another path, for example after
+  switching from a build of your own to a package, and dictated text went through the
+  clipboard. KWin now restarts it from the new binary.
+
 ## [0.6.0] - 2026-10-19
 
 ### Added
