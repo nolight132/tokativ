@@ -205,7 +205,7 @@ fn entry_path() -> PathBuf {
 }
 
 /// Keeps Tokativ's entry in System Settings' list of virtual keyboards pointing at the running
-/// binary, and chooses it once when no other input method is chosen. A marker remembers that it
+/// binary, restarts the input method when that path changes, and chooses it once when no other input method is chosen. A marker remembers that it
 /// was, so a later choice of none or of another one in System Settings stays.
 pub(crate) fn register() -> Result<()> {
     if tokativ_config::sandbox().is_some() {
@@ -222,6 +222,13 @@ pub(crate) fn register() -> Result<()> {
     if fs::read_to_string(&entry).ok().as_deref() != Some(text.as_str()) {
         fs::create_dir_all(entry.parent().context("the entry path has no parent")?)?;
         fs::write(&entry, &text).with_context(|| format!("writing {}", entry.display()))?;
+        // KWin keeps running the old command, or none when that binary is gone, as after a test
+        // build in /tmp and a reboot. It reads the entry again only when the setting changes.
+        if chosen().as_deref() == Some(entry.as_path()) {
+            choose(Path::new(""))?;
+            choose(&entry)?;
+            log::info!("insert: asked KWin to restart Tokativ's input method from the new binary");
+        }
     }
 
     let marker = dirs::state_dir()
@@ -237,7 +244,8 @@ pub(crate) fn register() -> Result<()> {
     fs::write(&marker, b"").with_context(|| format!("writing {}", marker.display()))
 }
 
-/// Sets `entry` as KWin's input method. `--notify` makes KWin start it right away.
+/// Sets `entry` as KWin's input method, or none for an empty path. `--notify` makes KWin start
+/// it right away.
 fn choose(entry: &Path) -> Result<()> {
     let status = Command::new("kwriteconfig6")
         .args([

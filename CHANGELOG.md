@@ -17,6 +17,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The preview in Settings → Appearance keeps its height while the arrow is held. It is always
   as tall as a 16:9 monitor drawn across it, so nothing below it moves.
 
+### Fixed
+
+- On Plasma the input method stayed off after Tokativ moved to another path, for example after
+  switching from a build of your own to a package, and dictated text went through the
+  clipboard. KWin now restarts it from the new binary.
+
 ## [0.6.0] - 2026-10-19
 
 ### Added
