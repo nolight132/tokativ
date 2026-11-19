@@ -7,6 +7,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-19
+
 ### Added
 
 - A size for the pill and the caption, from 75% to 150%, under Settings → Appearance. The
@@ -215,7 +217,8 @@ focused app as you speak.
 - A tray icon and a `tokativ` command line control the daemon.
 - The Home Manager module runs Tokativ as a user service and can fetch models at build time.
 
-[unreleased]: https://github.com/nolight132/tokativ/compare/v0.6.0...HEAD
+[unreleased]: https://github.com/nolight132/tokativ/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/nolight132/tokativ/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/nolight132/tokativ/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/nolight132/tokativ/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/nolight132/tokativ/compare/v0.3.1...v0.4.0
